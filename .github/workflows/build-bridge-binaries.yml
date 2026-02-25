@@ -1,0 +1,124 @@
+name: Build Bridge Binaries
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+    tags:
+      - 'bridge-v*'
+  workflow_dispatch:
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            platform: linux
+            arch: x86_64
+            binary_name: lean_bridge
+            asset_name: lean_bridge-linux-x86_64
+          - os: macos-15
+            platform: macos
+            arch: x86_64
+            binary_name: lean_bridge
+            asset_name: lean_bridge-macos-x86_64
+          - os: macos-latest
+            platform: macos
+            arch: arm64
+            binary_name: lean_bridge
+            asset_name: lean_bridge-macos-arm64
+          - os: windows-latest
+            platform: windows
+            arch: x86_64
+            binary_name: lean_bridge.exe
+            asset_name: lean_bridge-windows-x86_64.exe
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Elan (Unix)
+        if: matrix.platform != 'windows'
+        run: |
+          curl https://elan.lean-lang.org/elan-init.sh -sSf | sh -s -- -y --default-toolchain none
+          echo "$HOME/.elan/bin" >> $GITHUB_PATH
+
+      - name: Install Elan (Windows)
+        if: matrix.platform == 'windows'
+        run: |
+          Invoke-WebRequest -Uri "https://github.com/leanprover/elan/releases/latest/download/elan-x86_64-pc-windows-msvc.zip" -OutFile elan.zip
+          Expand-Archive elan.zip -DestinationPath elan-extract
+          .\elan-extract\elan-init.exe -y --default-toolchain none
+          echo "$env:USERPROFILE\.elan\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+        shell: pwsh
+
+      - name: Cache Lake packages
+        uses: actions/cache@v4
+        with:
+          path: .lake
+          key: lake-bridge-${{ matrix.platform }}-${{ matrix.arch }}-${{ hashFiles('lakefile.toml', 'lean-toolchain') }}
+          restore-keys: |
+            lake-bridge-${{ matrix.platform }}-${{ matrix.arch }}-
+
+      - name: Build lean_bridge (Unix)
+        if: matrix.platform != 'windows'
+        run: |
+          lake update
+          lake build lean_bridge
+
+      - name: Build lean_bridge (Windows)
+        if: matrix.platform == 'windows'
+        run: |
+          lake update
+          lake build lean_bridge
+        shell: pwsh
+
+      - name: Stage artifact (Unix)
+        if: matrix.platform != 'windows'
+        run: |
+          mkdir -p dist
+          cp .lake/build/bin/${{ matrix.binary_name }} dist/${{ matrix.asset_name }}
+          chmod +x dist/${{ matrix.asset_name }}
+          ls -la dist/
+
+      - name: Stage artifact (Windows)
+        if: matrix.platform == 'windows'
+        run: |
+          New-Item -ItemType Directory -Force dist | Out-Null
+          Copy-Item ".lake\build\bin\${{ matrix.binary_name }}" "dist\${{ matrix.asset_name }}"
+          Get-ChildItem dist
+        shell: pwsh
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: bridge-${{ matrix.platform }}-${{ matrix.arch }}
+          path: dist/${{ matrix.asset_name }}
+          retention-days: 7
+
+  release:
+    needs: build
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/bridge-v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: bridge-*
+          path: dist
+          merge-multiple: true
+
+      - name: List assets
+        run: ls -la dist
+
+      - name: Publish release assets
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*

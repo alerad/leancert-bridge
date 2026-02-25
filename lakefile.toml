@@ -1,0 +1,12 @@
+name = "LeanCertBridge"
+version = "0.1.0"
+defaultTargets = ["lean_bridge"]
+
+[[require]]
+name = "leancert"
+git = "https://github.com/alerad/leancert.git"
+rev = "main"
+
+[[lean_exe]]
+name = "lean_bridge"
+root = "LeanBridge"
