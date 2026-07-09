@@ -68,7 +68,7 @@ def bridgeApiVersion : String := "1.0.0"
 def bridgeVersion : String := "0.1.0"
 
 /-- Lean toolchain version used to build this bridge binary. -/
-def leanVersion : String := "4.28.0"
+def leanVersion : String := "4.31.0"
 
 /-- Raw rational for JSON IO. Uses Int numerator and Nat denominator. -/
 structure RawRat where
@@ -1225,6 +1225,6 @@ def main : IO Unit := do
     let line ← stdin.getLine
     if line.isEmpty then break
     -- Trim whitespace
-    let trimmed := line.trim
+    let trimmed := line.trimAscii.toString
     if !trimmed.isEmpty then
       LeanCert.Bridge.processRequest trimmed

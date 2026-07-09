@@ -13,6 +13,7 @@ This file defines the compatibility contract between:
 
 ## Required Methods
 
+- `get_info`
 - `ping`
 - `eval_interval`
 - `eval_interval_dyadic`
@@ -42,5 +43,3 @@ Bridge must provide method:
 - `get_info` -> `{ bridge_api_version, lean_version, bridge_version }`
 
 Python should call `get_info` on startup and enforce supported version range.
-
-> Note: current bridge implementation still needs `get_info` method added.
