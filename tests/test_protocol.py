@@ -4,6 +4,10 @@ import json
 import os
 import subprocess
 import unittest
+from pathlib import Path
+
+
+FIXTURES = Path(__file__).parent / "fixtures" / "bridge-contract-2.0"
 
 
 def rat(n: int, d: int = 1) -> dict[str, int]:
@@ -49,12 +53,29 @@ class BridgeContractTest(unittest.TestCase):
         self.assertEqual(response.get("id"), request_id)
         return response
 
+    def error_message(self, response: dict) -> str:
+        error = response["error"]
+        self.assertIsInstance(error, dict)
+        self.assertIn(error["code"], {"parse_error", "invalid_request", "invalid_params", "unknown_method"})
+        self.assertIsInstance(error["message"], str)
+        return error["message"]
+
     def test_info_advertises_typed_contract(self) -> None:
         result = self.call("get_info", {})["result"]
-        self.assertEqual(result["bridge_api_version"], "1.1.0")
+        self.assertEqual(result["protocol_name"], "leancert-line-json")
+        self.assertEqual(result["framing"], "ndjson")
+        self.assertEqual(result["bridge_api_version"], "2.0.0")
+        self.assertEqual(result["protocol_version"], "2.0.0")
         self.assertEqual(result["certificate_schemas"], ["bound-check/1"])
         self.assertIn("check_bound", result["operations"])
         self.assertIn("var", result["expression_nodes"])
+        self.assertEqual(result["capabilities"]["check_bound"]["request_schema"], "check-bound-request/1")
+        self.assertEqual(result["capabilities"]["check_bound"]["result_schema"], "bound-outcome/1")
+        self.assertNotIn("verify_adaptive", result["capabilities"])
+        self.assertEqual(
+            set(result["build"]),
+            {"source_revision", "source_digest", "environment_digest", "profile"},
+        )
 
     def test_zero_denominator_is_rejected(self) -> None:
         response = self.call(
@@ -66,7 +87,7 @@ class BridgeContractTest(unittest.TestCase):
                 "isUpperBound": True,
             },
         )
-        self.assertIn("denominator", response["error"])
+        self.assertIn("denominator", self.error_message(response))
 
     def test_inverted_interval_is_rejected(self) -> None:
         response = self.call(
@@ -78,7 +99,7 @@ class BridgeContractTest(unittest.TestCase):
                 "isUpperBound": True,
             },
         )
-        self.assertIn("lower endpoint", response["error"])
+        self.assertIn("lower endpoint", self.error_message(response))
 
     def test_missing_variable_dimension_is_rejected(self) -> None:
         response = self.call(
@@ -90,7 +111,7 @@ class BridgeContractTest(unittest.TestCase):
                 "isUpperBound": True,
             },
         )
-        self.assertIn("outside box dimension", response["error"])
+        self.assertIn("outside box dimension", self.error_message(response))
 
     def test_bound_outcomes_are_typed_and_backward_compatible(self) -> None:
         verified = self.call(
@@ -106,6 +127,8 @@ class BridgeContractTest(unittest.TestCase):
         self.assertEqual(verified["status"], "verified")
         self.assertEqual(verified["certificate"]["schema_version"], "bound-check/1")
         self.assertIn("computed_hi", verified)
+        expected = json.loads((FIXTURES / "verified-bound.json").read_text())
+        self.assertEqual(verified, expected)
 
         inconclusive = self.call(
             "check_bound",
@@ -119,6 +142,11 @@ class BridgeContractTest(unittest.TestCase):
         self.assertFalse(inconclusive["verified"])
         self.assertEqual(inconclusive["status"], "inconclusive")
         self.assertIsNone(inconclusive["certificate"])
+
+    def test_unknown_method_uses_structured_error(self) -> None:
+        response = self.call("not_an_operation", {})
+        self.assertEqual(response["error"]["code"], "unknown_method")
+        self.assertIn("not_an_operation", response["error"]["message"])
 
 
 if __name__ == "__main__":

@@ -4,6 +4,7 @@ Released under Apache 2.0 license as described in the file LICENSE.
 Authors: LeanCert Contributors
 -/
 import Lean.Data.Json
+import BridgeBuild.BuildInfo
 import LeanCert.Core.Expr
 import LeanCert.Engine.IntervalEval
 import LeanCert.Engine.IntervalEvalDyadic
@@ -15,14 +16,14 @@ import LeanCert.Validity.Bounds
 import LeanCert.ML.Distillation
 
 /-!
-# LeanBridge: JSON-RPC Bridge for Python Integration
+# LeanBridge: typed line-delimited JSON bridge for Python integration
 
-This module implements a stateless, type-safe JSON-RPC bridge over Standard I/O.
+This module implements a stateless, typed line-delimited JSON bridge over standard I/O.
 The compiled binary acts as a "Math Kernel" or "Oracle" that Python can communicate with.
 
 ## Protocol
 
-We use a simplified JSON-RPC 2.0 style over line-delimited JSON.
+This is a custom protocol. It is not JSON-RPC 2.0.
 
 ### Data Types
 - **Rational Numbers:** `{"n": 1, "d": 3}` for 1/3 (exact representation)
@@ -36,7 +37,7 @@ We use a simplified JSON-RPC 2.0 style over line-delimited JSON.
 
 ### Response Format
 ```json
-{ "id": 1, "result": { "lo": {...}, "hi": {...} }, "error": null }
+{ "id": 1, "result": { "lo": {...}, "hi": {...} } }
 ```
 
 ## Supported Methods
@@ -62,10 +63,10 @@ open Lean
 /-! ## 1. Serialization Helpers -/
 
 /-- Bridge contract API version. Major bumps are breaking. -/
-def bridgeApiVersion : String := "1.1.0"
+def bridgeApiVersion : String := "2.0.0"
 
 /-- Bridge binary version (decoupled from API version). -/
-def bridgeVersion : String := "0.2.0"
+def bridgeVersion : String := "0.3.0"
 
 /-- Lean toolchain version used to build this bridge binary. -/
 def leanVersion : String := Lean.versionString
@@ -75,6 +76,10 @@ def leanCertVersion : String := "4.31.0"
 
 /-- Certificate/result schema emitted by checked bound operations. -/
 def boundCertificateSchema : String := "bound-check/1"
+
+/-- Stable request and outcome schemas for the checked bound operation. -/
+def boundRequestSchema : String := "check-bound-request/1"
+def boundOutcomeSchema : String := "bound-outcome/1"
 
 /-- Raw rational for JSON IO. Uses Int numerator and Nat denominator. -/
 structure RawRat where
@@ -1212,11 +1217,19 @@ def handleDerivInterval (req : DerivIntervalRequest) : Json :=
 /-- Handle bridge metadata request for client compatibility checks. -/
 def handleGetInfo : Json :=
   Json.mkObj [
+    ("protocol_name", toJson "leancert-line-json"),
+    ("framing", toJson "ndjson"),
     ("protocol_version", toJson bridgeApiVersion),
     ("bridge_api_version", toJson bridgeApiVersion),
     ("bridge_version", toJson bridgeVersion),
     ("lean_version", toJson leanVersion),
     ("leancert_version", toJson leanCertVersion),
+    ("build", Json.mkObj [
+      ("source_revision", toJson LeanCert.Bridge.BuildInfo.sourceRevision),
+      ("source_digest", toJson LeanCert.Bridge.BuildInfo.sourceDigest),
+      ("environment_digest", toJson LeanCert.Bridge.BuildInfo.environmentDigest),
+      ("profile", toJson LeanCert.Bridge.BuildInfo.profile)
+    ]),
     ("certificate_schemas", toJson [boundCertificateSchema]),
     ("verification_routes", toJson ["compiled_checker"]),
     ("operations", toJson [
@@ -1228,12 +1241,11 @@ def handleGetInfo : Json :=
     ]),
     ("capabilities", Json.mkObj [
       ("check_bound", Json.mkObj [
-        ("schema_version", toJson "1.1"),
-        ("outcomes", toJson ["verified", "inconclusive", "unsupported", "domain_obstruction"]),
-        ("backends", toJson ["rational_global_optimization"])
-      ]),
-      ("verify_adaptive", Json.mkObj [
-        ("schema_version", toJson "1.1"),
+        ("schema_version", toJson "2.0"),
+        ("request_schema", toJson boundRequestSchema),
+        ("result_schema", toJson boundOutcomeSchema),
+        ("certificate_schemas", toJson [boundCertificateSchema]),
+        ("verification_routes", toJson ["compiled_checker"]),
         ("outcomes", toJson ["verified", "inconclusive", "unsupported", "domain_obstruction"]),
         ("backends", toJson ["rational_global_optimization"])
       ])
@@ -1248,7 +1260,14 @@ def handleGetInfo : Json :=
 
 /-! ## 5. Main Event Loop -/
 
-/-- Process a single JSON-RPC request -/
+/-- Structured infrastructure error used by Bridge Contract 2.0. -/
+def protocolError (code message : String) : Json :=
+  Json.mkObj [("error", Json.mkObj [
+    ("code", toJson code),
+    ("message", toJson message)
+  ])]
+
+/-- Process one request from the custom line-delimited JSON protocol. -/
 def processRequest (line : String) : IO Unit := do
   let respond (j : Json) : IO Unit := do
     IO.println j.compress
@@ -1256,13 +1275,13 @@ def processRequest (line : String) : IO Unit := do
 
   match Json.parse line with
   | Except.error e =>
-    respond (Json.mkObj [("error", s!"JSON parse error: {e}")])
+    respond (protocolError "parse_error" s!"JSON parse error: {e}")
   | Except.ok j =>
     let reqId := j.getObjVal? "id" |>.toOption
 
     match j.getObjValAs? String "method" with
     | Except.error _ =>
-      respond (Json.mkObj [("error", "Missing 'method' field")])
+      respond (protocolError "invalid_request" "Missing 'method' field")
     | Except.ok method =>
       let args := match j.getObjVal? "params" with
         | Except.ok a => a
@@ -1272,82 +1291,82 @@ def processRequest (line : String) : IO Unit := do
         | "eval_interval" =>
           match fromJson? (α := EvalRequest) args with
           | Except.ok req => Json.mkObj [("result", handleEvalInterval req)]
-          | Except.error e => Json.mkObj [("error", s!"Invalid eval_interval params: {e}")]
+          | Except.error e => protocolError "invalid_params" s!"Invalid eval_interval params: {e}"
 
         | "eval_interval_dyadic" =>
           match fromJson? (α := EvalDyadicRequest) args with
           | Except.ok req => Json.mkObj [("result", handleEvalIntervalDyadic req)]
-          | Except.error e => Json.mkObj [("error", s!"Invalid eval_interval_dyadic params: {e}")]
+          | Except.error e => protocolError "invalid_params" s!"Invalid eval_interval_dyadic params: {e}"
 
         | "eval_interval_affine" =>
           match fromJson? (α := EvalAffineRequest) args with
           | Except.ok req => Json.mkObj [("result", handleEvalIntervalAffine req)]
-          | Except.error e => Json.mkObj [("error", s!"Invalid eval_interval_affine params: {e}")]
+          | Except.error e => protocolError "invalid_params" s!"Invalid eval_interval_affine params: {e}"
 
         | "global_min" =>
           match fromJson? (α := OptimizeRequest) args with
           | Except.ok req => Json.mkObj [("result", handleGlobalMin req)]
-          | Except.error e => Json.mkObj [("error", s!"Invalid global_min params: {e}")]
+          | Except.error e => protocolError "invalid_params" s!"Invalid global_min params: {e}"
 
         | "global_max" =>
           match fromJson? (α := OptimizeRequest) args with
           | Except.ok req => Json.mkObj [("result", handleGlobalMax req)]
-          | Except.error e => Json.mkObj [("error", s!"Invalid global_max params: {e}")]
+          | Except.error e => protocolError "invalid_params" s!"Invalid global_max params: {e}"
 
         | "global_min_dyadic" =>
           match fromJson? (α := OptimizeDyadicRequest) args with
           | Except.ok req => Json.mkObj [("result", handleGlobalMinDyadic req)]
-          | Except.error e => Json.mkObj [("error", s!"Invalid global_min_dyadic params: {e}")]
+          | Except.error e => protocolError "invalid_params" s!"Invalid global_min_dyadic params: {e}"
 
         | "global_max_dyadic" =>
           match fromJson? (α := OptimizeDyadicRequest) args with
           | Except.ok req => Json.mkObj [("result", handleGlobalMaxDyadic req)]
-          | Except.error e => Json.mkObj [("error", s!"Invalid global_max_dyadic params: {e}")]
+          | Except.error e => protocolError "invalid_params" s!"Invalid global_max_dyadic params: {e}"
 
         | "global_min_affine" =>
           match fromJson? (α := OptimizeAffineRequest) args with
           | Except.ok req => Json.mkObj [("result", handleGlobalMinAffine req)]
-          | Except.error e => Json.mkObj [("error", s!"Invalid global_min_affine params: {e}")]
+          | Except.error e => protocolError "invalid_params" s!"Invalid global_min_affine params: {e}"
 
         | "global_max_affine" =>
           match fromJson? (α := OptimizeAffineRequest) args with
           | Except.ok req => Json.mkObj [("result", handleGlobalMaxAffine req)]
-          | Except.error e => Json.mkObj [("error", s!"Invalid global_max_affine params: {e}")]
+          | Except.error e => protocolError "invalid_params" s!"Invalid global_max_affine params: {e}"
 
         | "check_bound" =>
           match fromJson? (α := CheckBoundRequest) args with
           | Except.ok req => Json.mkObj [("result", handleCheckBound req)]
-          | Except.error e => Json.mkObj [("error", s!"Invalid check_bound params: {e}")]
+          | Except.error e => protocolError "invalid_params" s!"Invalid check_bound params: {e}"
 
         | "integrate" =>
           match fromJson? (α := IntegrateRequest) args with
           | Except.ok req => Json.mkObj [("result", handleIntegrate req)]
-          | Except.error e => Json.mkObj [("error", s!"Invalid integrate params: {e}")]
+          | Except.error e => protocolError "invalid_params" s!"Invalid integrate params: {e}"
 
         | "find_roots" =>
           match fromJson? (α := FindRootsRequest) args with
           | Except.ok req => Json.mkObj [("result", handleFindRoots req)]
-          | Except.error e => Json.mkObj [("error", s!"Invalid find_roots params: {e}")]
+          | Except.error e => protocolError "invalid_params" s!"Invalid find_roots params: {e}"
 
         | "find_unique_root" =>
           match fromJson? (α := FindUniqueRootRequest) args with
           | Except.ok req => Json.mkObj [("result", handleFindUniqueRoot req)]
-          | Except.error e => Json.mkObj [("error", s!"Invalid find_unique_root params: {e}")]
+          | Except.error e => protocolError "invalid_params" s!"Invalid find_unique_root params: {e}"
 
         | "verify_adaptive" =>
           match fromJson? (α := VerifyAdaptiveRequest) args with
           | Except.ok req => Json.mkObj [("result", handleVerifyAdaptive req)]
-          | Except.error e => Json.mkObj [("error", s!"Invalid verify_adaptive params: {e}")]
+          | Except.error e => protocolError "invalid_params" s!"Invalid verify_adaptive params: {e}"
 
         | "forward_interval" =>
           match fromJson? (α := ForwardIntervalRequest) args with
           | Except.ok req => Json.mkObj [("result", handleForwardInterval req)]
-          | Except.error e => Json.mkObj [("error", s!"Invalid forward_interval params: {e}")]
+          | Except.error e => protocolError "invalid_params" s!"Invalid forward_interval params: {e}"
 
         | "deriv_interval" =>
           match fromJson? (α := DerivIntervalRequest) args with
           | Except.ok req => Json.mkObj [("result", handleDerivInterval req)]
-          | Except.error e => Json.mkObj [("error", s!"Invalid deriv_interval params: {e}")]
+          | Except.error e => protocolError "invalid_params" s!"Invalid deriv_interval params: {e}"
 
         | "get_info" =>
           Json.mkObj [("result", handleGetInfo)]
@@ -1356,7 +1375,7 @@ def processRequest (line : String) : IO Unit := do
           Json.mkObj [("result", "pong")]
 
         | other =>
-          Json.mkObj [("error", s!"Unknown method: {other}")]
+          protocolError "unknown_method" s!"Unknown method: {other}"
 
       -- Attach ID if present
       let final := match reqId with
