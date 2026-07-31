@@ -5,6 +5,9 @@
 - Update `LeanBridge.lean`
 - If the protocol shape changed, update `BRIDGE_CONTRACT.md`
 - If breaking, bump `bridgeApiVersion` major
+- Confirm the tagged CI build reports the tag commit, non-sentinel source and
+  environment digests, and `profile: release`
+- Copy the contract fixtures into the matching `leancert-python` protocol tests
 
 ## 2. Create release tag
 

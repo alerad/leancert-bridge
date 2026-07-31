@@ -68,12 +68,14 @@ jobs:
         if: matrix.platform != 'windows'
         run: |
           lake update
+          python3 scripts/write_build_info.py --source-revision "${{ github.sha }}" --profile "${{ startsWith(github.ref, 'refs/tags/') && 'release' || 'ci' }}"
           lake build lean_bridge
 
       - name: Build lean_bridge (Windows)
         if: matrix.platform == 'windows'
         run: |
           lake update
+          python scripts/write_build_info.py --source-revision "${{ github.sha }}" --profile "${{ startsWith(github.ref, 'refs/tags/') && 'release' || 'ci' }}"
           lake build lean_bridge
         shell: pwsh
 
