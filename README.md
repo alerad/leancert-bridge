@@ -4,19 +4,21 @@ Standalone Lean bridge binary for the Python SDK.
 
 ## Purpose
 
-This repo builds and releases `lean_bridge` binaries that implement the JSON-RPC bridge on top of `leancert`.
+This repo builds and releases `lean_bridge` binaries that implement LeanCert's
+line-delimited JSON protocol.
 
 Runtime direction stays one-way:
 
 - Python SDK starts `lean_bridge`
-- Python sends JSON-RPC over stdin/stdout
-- Bridge returns verified results
+- Python sends requests over stdin/stdout
+- Bridge returns typed checked outcomes and exact provenance
 
 ## Local Build
 
 ```bash
 lake update
 lake build lean_bridge
+LEAN_BRIDGE=.lake/build/bin/lean_bridge python3 tests/test_protocol.py
 ```
 
 Binary output:

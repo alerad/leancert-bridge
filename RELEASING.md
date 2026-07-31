@@ -3,14 +3,14 @@
 ## 1. Ensure bridge code and contract are updated
 
 - Update `LeanBridge.lean`
-- If RPC shape changed, update `BRIDGE_CONTRACT.md`
+- If the protocol shape changed, update `BRIDGE_CONTRACT.md`
 - If breaking, bump `bridgeApiVersion` major
 
 ## 2. Create release tag
 
 Push tag like:
 
-- `bridge-v0.1.0`
+- `bridge-v0.2.0`
 
 CI builds binaries for Linux, macOS (x86_64/arm64), and Windows, then publishes release assets.
 

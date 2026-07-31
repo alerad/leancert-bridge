@@ -77,6 +77,17 @@ jobs:
           lake build lean_bridge
         shell: pwsh
 
+      - name: Run protocol contract tests (Unix)
+        if: matrix.platform != 'windows'
+        run: LEAN_BRIDGE=.lake/build/bin/${{ matrix.binary_name }} python3 tests/test_protocol.py
+
+      - name: Run protocol contract tests (Windows)
+        if: matrix.platform == 'windows'
+        run: |
+          $env:LEAN_BRIDGE = ".lake\build\bin\${{ matrix.binary_name }}"
+          python tests/test_protocol.py
+        shell: pwsh
+
       - name: Stage artifact (Unix)
         if: matrix.platform != 'windows'
         run: |

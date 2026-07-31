@@ -62,13 +62,19 @@ open Lean
 /-! ## 1. Serialization Helpers -/
 
 /-- Bridge contract API version. Major bumps are breaking. -/
-def bridgeApiVersion : String := "1.0.0"
+def bridgeApiVersion : String := "1.1.0"
 
 /-- Bridge binary version (decoupled from API version). -/
-def bridgeVersion : String := "0.1.0"
+def bridgeVersion : String := "0.2.0"
 
 /-- Lean toolchain version used to build this bridge binary. -/
-def leanVersion : String := "4.31.0"
+def leanVersion : String := Lean.versionString
+
+/-- LeanCert release selected by `lakefile.toml`. -/
+def leanCertVersion : String := "4.31.0"
+
+/-- Certificate/result schema emitted by checked bound operations. -/
+def boundCertificateSchema : String := "bound-check/1"
 
 /-- Raw rational for JSON IO. Uses Int numerator and Nat denominator. -/
 structure RawRat where
@@ -76,18 +82,20 @@ structure RawRat where
   d : Nat
   deriving Repr, Inhabited
 
+/-- Convert RawRat to Lean's Rat type. Parsed values always have nonzero denominator. -/
+def RawRat.toRat (r : RawRat) : ℚ :=
+  if r.d = 0 then 0 else r.n / r.d
+
 instance : FromJson RawRat where
   fromJson? j := do
     let n ← j.getObjValAs? Int "n"
     let d ← j.getObjValAs? Nat "d"
+    if d = 0 then
+      throw "rational denominator must be nonzero"
     return { n, d }
 
 instance : ToJson RawRat where
   toJson r := Json.mkObj [("n", toJson r.n), ("d", toJson r.d)]
-
-/-- Convert RawRat to Lean's Rat type -/
-def RawRat.toRat (r : RawRat) : ℚ :=
-  if r.d = 0 then 0 else r.n / r.d
 
 /-- Convert Rat to RawRat for JSON serialization -/
 def toRawRat (q : ℚ) : RawRat :=
@@ -103,6 +111,8 @@ instance : FromJson RawInterval where
   fromJson? j := do
     let lo ← j.getObjValAs? RawRat "lo"
     let hi ← j.getObjValAs? RawRat "hi"
+    if lo.toRat > hi.toRat then
+      throw "interval lower endpoint exceeds upper endpoint"
     return { lo, hi }
 
 instance : ToJson RawInterval where
@@ -153,6 +163,8 @@ instance : FromJson RawDyadicInterval where
   fromJson? j := do
     let lo ← j.getObjValAs? RawDyadic "lo"
     let hi ← j.getObjValAs? RawDyadic "hi"
+    if lo.toDyadic.toRat > hi.toDyadic.toRat then
+      throw "dyadic interval lower endpoint exceeds upper endpoint"
     return { lo, hi }
 
 instance : ToJson RawDyadicInterval where
@@ -327,6 +339,33 @@ partial def rawExprFromJson (j : Json) : Except String LExpr := do
 instance : FromJson LExpr where
   fromJson? := rawExprFromJson
 
+/-- Reject requests whose expression refers to a coordinate absent from the box.
+Out-of-range variables must not be silently interpreted as zero at the protocol boundary. -/
+def exprVarsInRange (dimension : Nat) : LExpr → Bool
+  | .const _ | .namedConst _ => true
+  | .var i => i < dimension
+  | .add e₁ e₂ | .mul e₁ e₂ => exprVarsInRange dimension e₁ && exprVarsInRange dimension e₂
+  | .neg e | .inv e | .exp e | .sin e | .cos e | .log e | .atan e | .arsinh e
+  | .atanh e | .sinc e | .erf e | .sinh e | .cosh e | .tanh e | .sqrt e =>
+      exprVarsInRange dimension e
+
+def validateExprBox (expr : LExpr) (box : Array RawInterval) : Except String Unit := do
+  if exprVarsInRange box.size expr then
+    return ()
+  throw s!"expression references a variable outside box dimension {box.size}"
+
+def validatePositive (name : String) (value : RawRat) : Except String Unit := do
+  if 0 < value.toRat then return ()
+  throw s!"{name} must be positive"
+
+/-- Executable reflection of the `ExprSupported` subset required by the
+published global-optimization Golden Theorems. -/
+def isGloballyOptimizable : LExpr → Bool
+  | .const _ | .var _ => true
+  | .add e₁ e₂ | .mul e₁ e₂ => isGloballyOptimizable e₁ && isGloballyOptimizable e₂
+  | .neg e | .exp e | .sin e | .cos e => isGloballyOptimizable e
+  | _ => false
+
 /-! ## 3. Request Structures -/
 
 /-- Request for interval evaluation -/
@@ -342,6 +381,7 @@ instance : FromJson EvalRequest where
     let boxArr ← match boxJson with
       | Json.arr arr => arr.mapM (FromJson.fromJson? (α := RawInterval))
       | _ => throw "box must be an array"
+    validateExprBox expr boxArr
     let taylorDepth := (j.getObjValAs? Nat "taylorDepth").toOption.getD 10
     return { expr, box := boxArr, taylorDepth }
 
@@ -361,8 +401,10 @@ instance : FromJson OptimizeRequest where
     let boxArr ← match boxJson with
       | Json.arr arr => arr.mapM (FromJson.fromJson? (α := RawInterval))
       | _ => throw "box must be an array"
+    validateExprBox expr boxArr
     let maxIters := (j.getObjValAs? Nat "maxIters").toOption.getD 1000
     let tolerance := (j.getObjValAs? RawRat "tolerance").toOption.getD { n := 1, d := 1000 }
+    validatePositive "tolerance" tolerance
     let useMonotonicity := (j.getObjValAs? Bool "useMonotonicity").toOption.getD true
     let taylorDepth := (j.getObjValAs? Nat "taylorDepth").toOption.getD 10
     return { expr, box := boxArr, maxIters, tolerance, useMonotonicity, taylorDepth }
@@ -382,6 +424,7 @@ instance : FromJson CheckBoundRequest where
     let boxArr ← match boxJson with
       | Json.arr arr => arr.mapM (FromJson.fromJson? (α := RawInterval))
       | _ => throw "box must be an array"
+    validateExprBox expr boxArr
     let bound ← j.getObjValAs? RawRat "bound"
     let isUpperBound ← j.getObjValAs? Bool "isUpperBound"
     let taylorDepth := (j.getObjValAs? Nat "taylorDepth").toOption.getD 10
@@ -399,6 +442,8 @@ instance : FromJson IntegrateRequest where
     let expr ← j.getObjValAs? LExpr "expr"
     let interval ← j.getObjValAs? RawInterval "interval"
     let partitions := (j.getObjValAs? Nat "partitions").toOption.getD 10
+    if partitions == 0 then throw "partitions must be positive"
+    if !exprVarsInRange 1 expr then throw "integration expressions may only reference variable 0"
     let taylorDepth := (j.getObjValAs? Nat "taylorDepth").toOption.getD 10
     return { expr, interval, partitions, taylorDepth }
 
@@ -416,6 +461,8 @@ instance : FromJson FindRootsRequest where
     let interval ← j.getObjValAs? RawInterval "interval"
     let maxIter := (j.getObjValAs? Nat "maxIter").toOption.getD 1000
     let tolerance := (j.getObjValAs? RawRat "tolerance").toOption.getD { n := 1, d := 1000 }
+    validatePositive "tolerance" tolerance
+    if !exprVarsInRange 1 expr then throw "root expressions may only reference variable 0"
     let taylorDepth := (j.getObjValAs? Nat "taylorDepth").toOption.getD 10
     return { expr, interval, maxIter, tolerance, taylorDepth }
 
@@ -429,6 +476,7 @@ instance : FromJson FindUniqueRootRequest where
   fromJson? j := do
     let expr ← j.getObjValAs? LExpr "expr"
     let interval ← j.getObjValAs? RawInterval "interval"
+    if !exprVarsInRange 1 expr then throw "root expressions may only reference variable 0"
     let taylorDepth := (j.getObjValAs? Nat "taylorDepth").toOption.getD 10
     return { expr, interval, taylorDepth }
 
@@ -449,10 +497,12 @@ instance : FromJson VerifyAdaptiveRequest where
     let boxArr ← match boxJson with
       | Json.arr arr => arr.mapM (FromJson.fromJson? (α := RawInterval))
       | _ => throw "box must be an array"
+    validateExprBox expr boxArr
     let bound ← j.getObjValAs? RawRat "bound"
     let isUpperBound ← j.getObjValAs? Bool "isUpperBound"
     let maxIters := (j.getObjValAs? Nat "maxIters").toOption.getD 1000
     let tolerance := (j.getObjValAs? RawRat "tolerance").toOption.getD { n := 1, d := 1000 }
+    validatePositive "tolerance" tolerance
     let taylorDepth := (j.getObjValAs? Nat "taylorDepth").toOption.getD 10
     return { expr, box := boxArr, bound, isUpperBound, maxIters, tolerance, taylorDepth }
 
@@ -469,6 +519,7 @@ instance : FromJson EvalDyadicRequest where
     let boxArr ← match boxJson with
       | Json.arr arr => arr.mapM (FromJson.fromJson? (α := RawInterval))
       | _ => throw "box must be an array"
+    validateExprBox expr boxArr
     let config := (j.getObjValAs? RawDyadicConfig "config").toOption.getD {}
     return { expr, box := boxArr, config }
 
@@ -485,6 +536,7 @@ instance : FromJson EvalAffineRequest where
     let boxArr ← match boxJson with
       | Json.arr arr => arr.mapM (FromJson.fromJson? (α := RawInterval))
       | _ => throw "box must be an array"
+    validateExprBox expr boxArr
     let config := (j.getObjValAs? RawAffineConfig "config").toOption.getD {}
     return { expr, box := boxArr, config }
 
@@ -505,8 +557,10 @@ instance : FromJson OptimizeDyadicRequest where
     let boxArr ← match boxJson with
       | Json.arr arr => arr.mapM (FromJson.fromJson? (α := RawInterval))
       | _ => throw "box must be an array"
+    validateExprBox expr boxArr
     let maxIters := (j.getObjValAs? Nat "maxIters").toOption.getD 1000
     let tolerance := (j.getObjValAs? RawRat "tolerance").toOption.getD { n := 1, d := 1000 }
+    validatePositive "tolerance" tolerance
     let useMonotonicity := (j.getObjValAs? Bool "useMonotonicity").toOption.getD true
     let taylorDepth := (j.getObjValAs? Nat "taylorDepth").toOption.getD 10
     let precision := (j.getObjValAs? Int "precision").toOption.getD (-53)
@@ -529,8 +583,10 @@ instance : FromJson OptimizeAffineRequest where
     let boxArr ← match boxJson with
       | Json.arr arr => arr.mapM (FromJson.fromJson? (α := RawInterval))
       | _ => throw "box must be an array"
+    validateExprBox expr boxArr
     let maxIters := (j.getObjValAs? Nat "maxIters").toOption.getD 1000
     let tolerance := (j.getObjValAs? RawRat "tolerance").toOption.getD { n := 1, d := 1000 }
+    validatePositive "tolerance" tolerance
     let useMonotonicity := (j.getObjValAs? Bool "useMonotonicity").toOption.getD true
     let taylorDepth := (j.getObjValAs? Nat "taylorDepth").toOption.getD 10
     let maxNoiseSymbols := (j.getObjValAs? Nat "maxNoiseSymbols").toOption.getD 0
@@ -583,10 +639,25 @@ instance : FromJson DerivIntervalRequest where
     let boxArr ← match boxJson with
       | Json.arr arr => arr.mapM (FromJson.fromJson? (α := RawInterval))
       | _ => throw "box must be an array"
+    validateExprBox expr boxArr
     let taylorDepth := (j.getObjValAs? Nat "taylorDepth").toOption.getD 10
     return { expr, box := boxArr, taylorDepth }
 
 /-! ## 4. Request Handlers -/
+
+def boundCertificateJson (checker verifier : String) : Json :=
+  Json.mkObj [
+    ("schema_version", toJson boundCertificateSchema),
+    ("checker", toJson checker),
+    ("verifier", toJson verifier),
+    ("verification_route", toJson "compiled_checker")
+  ]
+
+def boundEnclosureJson (lo hi : ℚ) : Json :=
+  Json.mkObj [
+    ("lo", toJson (toRawRat lo)),
+    ("hi", toJson (toRawRat hi))
+  ]
 
 /-- Handle interval evaluation request -/
 def handleEvalInterval (req : EvalRequest) : Json :=
@@ -804,21 +875,50 @@ def handleGlobalMaxAffine (req : OptimizeAffineRequest) : Json :=
 
 /-- Handle bound checking request -/
 def handleCheckBound (req : CheckBoundRequest) : Json :=
-  let intervals := req.box.toList.map RawInterval.toInterval
-  let env : IntervalEnv := fun i => intervals.getD i (IntervalRat.singleton 0)
-  let cfg : EvalConfig := { taylorDepth := req.taylorDepth }
-  let result := evalIntervalCoreWithDiv req.expr env cfg
+  let box : Box := req.box.toList.map RawInterval.toInterval
+  let cfg : GlobalOptConfig := {
+    maxIterations := 1000
+    tolerance := 1 / 1000
+    useMonotonicity := true
+    taylorDepth := req.taylorDepth
+  }
+  let env : IntervalEnv := box.toEnv
   let bound := req.bound.toRat
-
-  let verified := if req.isUpperBound then
-    decide (result.hi ≤ bound)  -- Upper bound: max value ≤ bound
+  let domainValid := checkDomainValid req.expr env { taylorDepth := req.taylorDepth }
+  let supported := isGloballyOptimizable req.expr
+  let result := if req.isUpperBound then
+    globalMaximizeCore req.expr box cfg
   else
-    decide (bound ≤ result.lo)  -- Lower bound: bound ≤ min value
+    globalMinimizeCore req.expr box cfg
+
+  let inequality := if req.isUpperBound then
+    decide (result.bound.hi ≤ bound)
+  else
+    decide (bound ≤ result.bound.lo)
+  let verified := supported && domainValid && inequality
+  let status := if !supported then "unsupported"
+    else if !domainValid then "domain_obstruction"
+    else if verified then "verified" else "inconclusive"
+  let checker := if req.isUpperBound then
+    "LeanCert.Validity.GlobalOpt.checkGlobalUpperBound"
+  else
+    "LeanCert.Validity.GlobalOpt.checkGlobalLowerBound"
+  let verifier := if req.isUpperBound then
+    "LeanCert.Validity.GlobalOpt.verify_global_upper_bound"
+  else
+    "LeanCert.Validity.GlobalOpt.verify_global_lower_bound"
 
   Json.mkObj [
     ("verified", toJson verified),
-    ("computed_lo", toJson (toRawRat result.lo)),
-    ("computed_hi", toJson (toRawRat result.hi))
+    ("computed_lo", toJson (toRawRat result.bound.lo)),
+    ("computed_hi", toJson (toRawRat result.bound.hi)),
+    ("status", toJson status),
+    ("direction", toJson (if req.isUpperBound then "upper" else "lower")),
+    ("enclosure", boundEnclosureJson result.bound.lo result.bound.hi),
+    ("backend", toJson "rational_global_optimization"),
+    ("certificate", if verified then
+      boundCertificateJson checker verifier
+      else Json.null)
   ]
 
 /-- Computable single-interval integration.
@@ -1005,21 +1105,41 @@ def handleVerifyAdaptive (req : VerifyAdaptiveRequest) : Json :=
     taylorDepth := req.taylorDepth
   }
   let bound := req.bound.toRat
-
-  -- For upper bound: verify f <= c ⟺ min(c - f) >= 0
-  -- For lower bound: verify f >= c ⟺ min(f - c) >= 0
-  let testExpr := if req.isUpperBound then
-    Expr.add (Expr.const bound) (Expr.neg req.expr)  -- c - f
+  let env : IntervalEnv := fun i => box.getD i (IntervalRat.singleton 0)
+  let domainValid := checkDomainValid req.expr env { taylorDepth := req.taylorDepth }
+  let supported := isGloballyOptimizable req.expr
+  let result := if req.isUpperBound then
+    globalMaximizeCore req.expr box cfg
   else
-    Expr.add req.expr (Expr.neg (Expr.const bound))  -- f - c
-
-  let result := globalMinimizeCore testExpr box cfg
-  let verified := decide (result.bound.lo ≥ 0)
+    globalMinimizeCore req.expr box cfg
+  let inequality := if req.isUpperBound then
+    decide (result.bound.hi ≤ bound)
+  else
+    decide (bound ≤ result.bound.lo)
+  let verified := supported && domainValid && inequality
+  let status := if !supported then "unsupported"
+    else if !domainValid then "domain_obstruction"
+    else if verified then "verified" else "inconclusive"
+  let gap := if req.isUpperBound then bound - result.bound.hi
+    else result.bound.lo - bound
+  let checker := if req.isUpperBound then
+    "LeanCert.Validity.GlobalOpt.checkGlobalUpperBound"
+  else
+    "LeanCert.Validity.GlobalOpt.checkGlobalLowerBound"
+  let verifier := if req.isUpperBound then
+    "LeanCert.Validity.GlobalOpt.verify_global_upper_bound"
+  else
+    "LeanCert.Validity.GlobalOpt.verify_global_lower_bound"
 
   Json.mkObj [
     ("verified", toJson verified),
-    ("minValue", toJson (toRawRat result.bound.lo)),
-    ("remainingBoxes", toJson result.remainingBoxes.length)
+    ("minValue", toJson (toRawRat gap)),
+    ("remainingBoxes", toJson result.remainingBoxes.length),
+    ("status", toJson status),
+    ("direction", toJson (if req.isUpperBound then "upper" else "lower")),
+    ("enclosure", boundEnclosureJson result.bound.lo result.bound.hi),
+    ("backend", toJson "rational_global_optimization"),
+    ("certificate", if verified then boundCertificateJson checker verifier else Json.null)
   ]
 
 /-- Handle neural network forward interval propagation request.
@@ -1092,9 +1212,38 @@ def handleDerivInterval (req : DerivIntervalRequest) : Json :=
 /-- Handle bridge metadata request for client compatibility checks. -/
 def handleGetInfo : Json :=
   Json.mkObj [
+    ("protocol_version", toJson bridgeApiVersion),
     ("bridge_api_version", toJson bridgeApiVersion),
     ("bridge_version", toJson bridgeVersion),
-    ("lean_version", toJson leanVersion)
+    ("lean_version", toJson leanVersion),
+    ("leancert_version", toJson leanCertVersion),
+    ("certificate_schemas", toJson [boundCertificateSchema]),
+    ("verification_routes", toJson ["compiled_checker"]),
+    ("operations", toJson [
+      "ping", "get_info", "eval_interval", "eval_interval_dyadic",
+      "eval_interval_affine", "global_min", "global_max", "global_min_dyadic",
+      "global_max_dyadic", "global_min_affine", "global_max_affine", "check_bound",
+      "integrate", "find_roots", "find_unique_root", "verify_adaptive",
+      "forward_interval", "deriv_interval"
+    ]),
+    ("capabilities", Json.mkObj [
+      ("check_bound", Json.mkObj [
+        ("schema_version", toJson "1.1"),
+        ("outcomes", toJson ["verified", "inconclusive", "unsupported", "domain_obstruction"]),
+        ("backends", toJson ["rational_global_optimization"])
+      ]),
+      ("verify_adaptive", Json.mkObj [
+        ("schema_version", toJson "1.1"),
+        ("outcomes", toJson ["verified", "inconclusive", "unsupported", "domain_obstruction"]),
+        ("backends", toJson ["rational_global_optimization"])
+      ])
+    ]),
+    ("expression_nodes", toJson [
+      "const", "var", "neg", "add", "sub", "mul", "div", "pow",
+      "sin", "cos", "tan", "exp", "log", "sqrt", "inv", "atan",
+      "arsinh", "atanh", "sinc", "erf", "abs", "sinh", "cosh",
+      "tanh", "min", "max"
+    ])
   ]
 
 /-! ## 5. Main Event Loop -/

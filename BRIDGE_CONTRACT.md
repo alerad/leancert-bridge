@@ -1,45 +1,45 @@
-# Bridge Contract (v1)
+# Bridge Contract 1.1
 
-This file defines the compatibility contract between:
+LeanCert Bridge uses one line-delimited JSON request and response per operation.
+It is not JSON-RPC 2.0. Every parseable request has an `id`, `method`, and
+`params`; every response repeats the same `id` and contains exactly one of
+`result` or `error`.
 
-- `leancert-python` client (`LeanClient`)
-- `leancert-bridge` binary (`lean_bridge`)
+## Compatibility
 
-## Compatibility Rule
+`bridge_api_version` follows semantic versioning. Additive response fields and
+new operations increment the minor version. Removing fields or changing their
+meaning requires a major version.
 
-- `bridge_api_version` uses semver semantics.
-- Major version changes are breaking.
-- Python SDK must reject incompatible major versions at startup.
+## Handshake
 
-## Required Methods
+`get_info` reports protocol, bridge, Lean, and LeanCert versions; supported
+operations and expression nodes; certificate schemas; backends; outcomes; and
+verification routes. Clients must negotiate capabilities before other calls.
 
-- `get_info`
-- `ping`
-- `eval_interval`
-- `eval_interval_dyadic`
-- `eval_interval_affine`
-- `global_min`
-- `global_max`
-- `global_min_dyadic`
-- `global_max_dyadic`
-- `global_min_affine`
-- `global_max_affine`
-- `check_bound`
-- `integrate`
-- `find_roots`
-- `find_unique_root`
-- `verify_adaptive`
-- `forward_interval`
-- `deriv_interval`
+## Mathematical outcomes
 
-## Error Shape
+Normal mathematical non-success is a tagged result:
 
-Every response is line-delimited JSON. On failure, response must include `error` with a human-readable message.
+- `verified`: the advertised checker accepted the certificate;
+- `inconclusive`: the checked enclosure was insufficient;
+- `unsupported`: no advertised checked route supports the expression/configuration;
+- `domain_obstruction`: a partial operation could not be certified on the domain.
 
-## Version Handshake
+Malformed requests, protocol violations, and internal failures use `error`.
 
-Bridge must provide method:
+`check_bound` retains the legacy `verified`, `computed_lo`, and `computed_hi`
+fields through protocol 1.x and additionally returns `status`, `direction`,
+`enclosure`, `backend`, and a `certificate` descriptor.
 
-- `get_info` -> `{ bridge_api_version, lean_version, bridge_version }`
+## Input validity
 
-Python should call `get_info` on startup and enforce supported version range.
+The bridge rejects zero rational denominators, inverted intervals, and
+expressions that reference coordinates outside the supplied box. It never
+repairs malformed mathematical input by substituting zero or `[0, 0]`.
+
+## Verification route
+
+`compiled_checker` means the released native bridge evaluated a LeanCert
+Boolean checker whose Golden Theorem is named in the result. It does not claim
+that a fresh proof term was elaborated and kernel-checked for each request.
