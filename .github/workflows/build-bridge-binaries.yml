@@ -5,7 +5,7 @@ on:
   push:
     branches: [main]
     tags:
-      - 'bridge-v*'
+      - 'v*.*.*.*'
   workflow_dispatch:
 
 jobs:
@@ -115,7 +115,7 @@ jobs:
 
   release:
     needs: build
-    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/bridge-v')
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     permissions:
       contents: write
