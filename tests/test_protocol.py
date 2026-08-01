@@ -64,11 +64,11 @@ class BridgeContractTest(unittest.TestCase):
         result = self.call("get_info", {})["result"]
         self.assertEqual(result["protocol_name"], "leancert-line-json")
         self.assertEqual(result["framing"], "ndjson")
-        self.assertEqual(result["bridge_api_version"], "2.2.0")
-        self.assertEqual(result["protocol_version"], "2.2.0")
+        self.assertEqual(result["bridge_api_version"], "2.3.0")
+        self.assertEqual(result["protocol_version"], "2.3.0")
         self.assertEqual(
             result["certificate_schemas"],
-            ["bound-check/2", "adaptive-bound-check/1"],
+            ["bound-check/2", "adaptive-bound-check/1", "krawczyk-check/1"],
         )
         self.assertIn("check_bound", result["operations"])
         self.assertIn("var", result["expression_nodes"])
@@ -78,6 +78,16 @@ class BridgeContractTest(unittest.TestCase):
         adaptive = result["capabilities"]["verify_adaptive"]
         self.assertEqual(adaptive["schema_version"], "2.2")
         self.assertEqual(adaptive["result_schema"], "adaptive-bound-outcome/1")
+        system_root = result["capabilities"]["check_unique_system_root"]
+        self.assertEqual(system_root["schema_version"], "2.3")
+        self.assertEqual(
+            system_root["request_schema"], "check-unique-system-root-request/1"
+        )
+        self.assertEqual(
+            system_root["result_schema"], "unique-system-root-outcome/1"
+        )
+        self.assertEqual(system_root["certificate_schemas"], ["krawczyk-check/1"])
+        self.assertEqual(system_root["maximum_dimension"], 4)
         self.assertEqual(
             set(result["build"]),
             {"source_revision", "source_digest", "environment_digest", "profile"},
@@ -198,6 +208,114 @@ class BridgeContractTest(unittest.TestCase):
         self.assertFalse(inconclusive["verified"])
         self.assertEqual(inconclusive["status"], "inconclusive")
         self.assertIsNone(inconclusive["certificate"])
+
+    def test_unique_system_root_uses_checked_krawczyk_authority(self) -> None:
+        x = {"kind": "var", "idx": 0}
+        y = {"kind": "var", "idx": 1}
+        const_minus_two = {"kind": "const", "val": rat(-2)}
+        system = [
+            {
+                "kind": "add",
+                "e1": {
+                    "kind": "add",
+                    "e1": {"kind": "mul", "e1": x, "e2": x},
+                    "e2": y,
+                },
+                "e2": const_minus_two,
+            },
+            {
+                "kind": "add",
+                "e1": {
+                    "kind": "add",
+                    "e1": x,
+                    "e2": {"kind": "mul", "e1": y, "e2": y},
+                },
+                "e2": const_minus_two,
+            },
+        ]
+        box = [
+            {"lo": rat(9, 10), "hi": rat(11, 10)},
+            {"lo": rat(9, 10), "hi": rat(11, 10)},
+        ]
+
+        result = self.call(
+            "check_unique_system_root", {"system": system, "box": box}
+        )["result"]
+        self.assertTrue(result["verified"])
+        self.assertEqual(result["status"], "verified")
+        self.assertEqual(result["backend"], "rational_krawczyk")
+        self.assertEqual(result["search"]["source"], "automatic")
+        self.assertGreaterEqual(result["search"]["attempts"], 1)
+        self.assertIsNone(result["search"]["failure"])
+        certificate = result["certificate"]
+        self.assertEqual(certificate["schema_version"], "krawczyk-check/1")
+        self.assertEqual(certificate["checker"], "LeanCert.Engine.krawczykCheck")
+        self.assertEqual(
+            certificate["verifier"], "LeanCert.Validity.verify_unique_system_root"
+        )
+        self.assertEqual(
+            certificate["payload"]["schema_version"],
+            "checked-unique-system-root/1",
+        )
+        self.assertEqual(certificate["payload"]["system"], system)
+        self.assertEqual(certificate["payload"]["box"], box)
+
+        manual = self.call(
+            "check_unique_system_root",
+            {
+                "system": system,
+                "box": box,
+                "candidate": {
+                    "center": [rat(1), rat(1)],
+                    "preconditioner": [
+                        [rat(2, 3), rat(-1, 3)],
+                        [rat(-1, 3), rat(2, 3)],
+                    ],
+                },
+            },
+        )["result"]
+        self.assertTrue(manual["verified"])
+        self.assertEqual(manual["search"]["source"], "provided")
+
+    def test_unique_system_root_rejects_bad_shapes_and_candidates(self) -> None:
+        expression = {"kind": "var", "idx": 0}
+        mismatch = self.call(
+            "check_unique_system_root",
+            {"system": [expression], "box": [interval(0, 1), interval(0, 1)]},
+        )
+        self.assertIn("does not match", self.error_message(mismatch))
+
+        malformed_candidate = self.call(
+            "check_unique_system_root",
+            {
+                "system": [expression],
+                "box": [interval(-1, 1)],
+                "candidate": {
+                    "center": [rat(0)],
+                    "preconditioner": [[rat(1), rat(0)]],
+                },
+            },
+        )
+        self.assertIn("preconditioner row", self.error_message(malformed_candidate))
+
+        rejected = self.call(
+            "check_unique_system_root",
+            {
+                "system": [
+                    {
+                        "kind": "add",
+                        "e1": {"kind": "mul", "e1": expression, "e2": expression},
+                        "e2": {"kind": "const", "val": rat(1)},
+                    }
+                ],
+                "box": [interval(-1, 1)],
+                "maxIterations": 2,
+            },
+        )["result"]
+        self.assertFalse(rejected["verified"])
+        self.assertEqual(rejected["status"], "candidate_rejected")
+        self.assertIsNone(rejected["certificate"])
+        self.assertIsNotNone(rejected["search"]["failure"])
 
     def test_replay_payload_uses_the_lowered_checked_expression(self) -> None:
         verified = self.call(

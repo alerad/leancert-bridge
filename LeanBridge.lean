@@ -12,6 +12,7 @@ import LeanCert.Engine.IntervalEvalAffine
 import LeanCert.Engine.Optimization.Global
 import LeanCert.Engine.Optimization.Gradient
 import LeanCert.Engine.Integrate
+import LeanCert.Engine.RootFinding.KrawczykCandidate
 import LeanCert.Validity.Bounds
 import LeanCert.ML.Distillation
 
@@ -63,10 +64,10 @@ open Lean
 /-! ## 1. Serialization Helpers -/
 
 /-- Bridge contract API version. Major bumps are breaking. -/
-def bridgeApiVersion : String := "2.2.0"
+def bridgeApiVersion : String := "2.3.0"
 
 /-- Bridge binary version (decoupled from API version). -/
-def bridgeVersion : String := "0.4.0"
+def bridgeVersion : String := "0.5.0"
 
 /-- Lean toolchain version used to build this bridge binary. -/
 def leanVersion : String := Lean.versionString
@@ -84,11 +85,17 @@ def boundReplayPayloadSchema : String := "global-opt-bound-replay/1"
 def adaptiveCertificateSchema : String := "adaptive-bound-check/1"
 def adaptiveReplayPayloadSchema : String := "checked-global-opt-bound/1"
 
+/-- Retained fixed Krawczyk checker input for unique nonlinear-system roots. -/
+def krawczykCertificateSchema : String := "krawczyk-check/1"
+def krawczykReplayPayloadSchema : String := "checked-unique-system-root/1"
+
 /-- Stable request and outcome schemas for the checked bound operation. -/
 def boundRequestSchema : String := "check-bound-request/1"
 def boundOutcomeSchema : String := "bound-outcome/1"
 def adaptiveRequestSchema : String := "verify-adaptive-request/1"
 def adaptiveOutcomeSchema : String := "adaptive-bound-outcome/1"
+def systemRootRequestSchema : String := "check-unique-system-root-request/1"
+def systemRootOutcomeSchema : String := "unique-system-root-outcome/1"
 
 /-- Raw rational for JSON IO. Uses Int numerator and Nat denominator. -/
 structure RawRat where
@@ -523,6 +530,74 @@ instance : FromJson FindUniqueRootRequest where
     let taylorDepth := (j.getObjValAs? Nat "taylorDepth").toOption.getD 10
     return { expr, interval, taylorDepth }
 
+/-- Optional exact candidate supplied by an untrusted external numerical solver. -/
+structure RawKrawczykCandidate where
+  center : Array RawRat
+  preconditioner : Array (Array RawRat)
+  deriving Repr, Inhabited
+
+instance : FromJson RawKrawczykCandidate where
+  fromJson? j := do
+    let centerJson ← j.getObjVal? "center"
+    let center ← match centerJson with
+      | Json.arr values => values.mapM (FromJson.fromJson? (α := RawRat))
+      | _ => throw "candidate center must be an array"
+    let matrixJson ← j.getObjVal? "preconditioner"
+    let preconditioner ← match matrixJson with
+      | Json.arr rows => rows.mapM fun row => match row with
+          | Json.arr values => values.mapM (FromJson.fromJson? (α := RawRat))
+          | _ => throw "candidate preconditioner rows must be arrays"
+      | _ => throw "candidate preconditioner must be an array"
+    return { center, preconditioner }
+
+/-- Checked unique-system-root request. Candidate construction is untrusted;
+    only `krawczykCheck` controls the `verified` outcome. -/
+structure CheckUniqueSystemRootRequest where
+  system : Array LExpr
+  box : Array RawInterval
+  candidate : Option RawKrawczykCandidate := none
+  maxIterations : Nat := 8
+  maxDimension : Nat := 4
+  precisionBits : Nat := 20
+  taylorDepth : Nat := 10
+  deriving Repr, Inhabited
+
+instance : FromJson CheckUniqueSystemRootRequest where
+  fromJson? j := do
+    let systemJson ← j.getObjVal? "system"
+    let system ← match systemJson with
+      | Json.arr values => values.mapM (FromJson.fromJson? (α := LExpr))
+      | _ => throw "system must be an array"
+    let boxJson ← j.getObjVal? "box"
+    let box ← match boxJson with
+      | Json.arr values => values.mapM (FromJson.fromJson? (α := RawInterval))
+      | _ => throw "box must be an array"
+    if system.isEmpty then throw "system dimension must be positive"
+    if system.size != box.size then
+      throw s!"system dimension {system.size} does not match box dimension {box.size}"
+    for expression in system do
+      if !exprVarsInRange box.size expression then
+        throw s!"system expression references a variable outside box dimension {box.size}"
+    let candidate ← match j.getObjVal? "candidate" with
+      | Except.error _ => pure none
+      | Except.ok Json.null => pure none
+      | Except.ok value => some <$> FromJson.fromJson? value
+    match candidate with
+    | none => pure ()
+    | some value =>
+        if value.center.size != box.size then
+          throw s!"candidate center dimension {value.center.size} does not match system dimension {box.size}"
+        if value.preconditioner.size != box.size then
+          throw s!"candidate preconditioner has {value.preconditioner.size} rows; expected {box.size}"
+        for row in value.preconditioner do
+          if row.size != box.size then
+            throw s!"candidate preconditioner row has dimension {row.size}; expected {box.size}"
+    let maxIterations := (j.getObjValAs? Nat "maxIterations").toOption.getD 8
+    let maxDimension := (j.getObjValAs? Nat "maxDimension").toOption.getD 4
+    let precisionBits := (j.getObjValAs? Nat "precisionBits").toOption.getD 20
+    let taylorDepth := (j.getObjValAs? Nat "taylorDepth").toOption.getD 10
+    return { system, box, candidate, maxIterations, maxDimension, precisionBits, taylorDepth }
+
 /-- Request for adaptive verification using optimization -/
 structure VerifyAdaptiveRequest where
   expr : LExpr
@@ -736,6 +811,43 @@ def adaptiveCertificateJson (req : VerifyAdaptiveRequest) (cfg : GlobalOptConfig
         ("use_monotonicity", toJson cfg.useMonotonicity),
         ("taylor_depth", toJson cfg.taylorDepth)
       ])
+    ])
+  ]
+
+def ratListJson (values : List ℚ) : Json :=
+  toJson (values.map toRawRat)
+
+def ratMatrixJson (values : List (List ℚ)) : Json :=
+  Json.arr (values.map (fun row => ratListJson row)).toArray
+
+def automaticKrawczykFailureJson : AutomaticKrawczykFailure → Json
+  | .invalidDimension => Json.mkObj [("kind", toJson "invalid_dimension")]
+  | .dimensionLimit actual limit => Json.mkObj [
+      ("kind", toJson "dimension_limit"), ("actual", toJson actual), ("limit", toJson limit)]
+  | .unsupportedAD => Json.mkObj [("kind", toJson "unsupported_expression")]
+  | .singularPointJacobian attempt => Json.mkObj [
+      ("kind", toJson "singular_point_jacobian"), ("attempt", toJson attempt)]
+  | .centerEscaped attempt => Json.mkObj [
+      ("kind", toJson "center_escaped"), ("attempt", toJson attempt)]
+  | .stagnated attempt => Json.mkObj [
+      ("kind", toJson "stagnated"), ("attempt", toJson attempt)]
+  | .exhausted attempts => Json.mkObj [
+      ("kind", toJson "exhausted"), ("attempts", toJson attempts)]
+
+def krawczykCertificateJson (req : CheckUniqueSystemRootRequest)
+    (center : List ℚ) (preconditioner : List (List ℚ)) : Json :=
+  Json.mkObj [
+    ("schema_version", toJson krawczykCertificateSchema),
+    ("checker", toJson "LeanCert.Engine.krawczykCheck"),
+    ("verifier", toJson "LeanCert.Validity.verify_unique_system_root"),
+    ("verification_route", toJson "compiled_checker"),
+    ("payload", Json.mkObj [
+      ("schema_version", toJson krawczykReplayPayloadSchema),
+      ("system", Json.arr (req.system.map exprToJson)),
+      ("box", toJson (req.box.map fun interval => toRawInterval interval.toInterval)),
+      ("center", ratListJson center),
+      ("preconditioner", ratMatrixJson preconditioner),
+      ("config", Json.mkObj [("taylor_depth", toJson req.taylorDepth)])
     ])
   ]
 
@@ -1183,6 +1295,60 @@ def handleFindUniqueRoot (req : FindUniqueRootRequest) : Json :=
         ])
       ]
 
+/-- Generate or accept an exact rational Krawczyk candidate, then independently
+    run the fixed Boolean checker which is the sole authority for success. -/
+def handleCheckUniqueSystemRoot (req : CheckUniqueSystemRootRequest) : Json :=
+  let n := req.system.size
+  let system : Fin n → LExpr := fun i => req.system[i.val]!
+  let box : Fin n → IntervalRat := fun i => req.box[i.val]!.toInterval
+  let cfg : EvalConfig := { taylorDepth := req.taylorDepth }
+  let search : AutomaticKrawczykConfig := {
+    maxIterations := req.maxIterations
+    maxDimension := req.maxDimension
+    precisionBits := req.precisionBits
+  }
+  let report := match req.candidate with
+    | none => generateAutomaticKrawczyk system box cfg search
+    | some candidate =>
+        let center := candidate.center.toList.map RawRat.toRat
+        let preconditioner := candidate.preconditioner.toList.map fun (row : Array RawRat) =>
+          row.toList.map RawRat.toRat
+        let cert := KrawczykCert.ofLists n center preconditioner
+        let checked := krawczykCheck system box cert cfg
+        {
+          dimension := n
+          attempts := 1
+          center
+          preconditioner
+          failure := if checked then none else some (.exhausted 1)
+        }
+  let checked := if report.succeeded then
+    let cert := KrawczykCert.ofLists n report.center report.preconditioner
+    krawczykCheck system box cert cfg
+  else false
+  let status := if checked then "verified" else match report.failure with
+    | some .unsupportedAD => "unsupported"
+    | some .invalidDimension | some (.dimensionLimit ..) => "unsupported"
+    | some (.singularPointJacobian ..) | some (.centerEscaped ..) |
+        some (.stagnated ..) | some (.exhausted ..) => "candidate_rejected"
+    | none => "candidate_rejected"
+  Json.mkObj [
+    ("verified", toJson checked),
+    ("status", toJson status),
+    ("backend", toJson "rational_krawczyk"),
+    ("root_box", toJson (req.box.map fun interval => toRawInterval interval.toInterval)),
+    ("search", Json.mkObj [
+      ("source", toJson (if req.candidate.isSome then "provided" else "automatic")),
+      ("attempts", toJson report.attempts),
+      ("refinements", toJson report.refinements),
+      ("contraction_bound", toJson (toRawRat report.contractionBound)),
+      ("failure", report.failure.map automaticKrawczykFailureJson |>.getD Json.null)
+    ]),
+    ("certificate", if checked then
+      krawczykCertificateJson req report.center report.preconditioner
+      else Json.null)
+  ]
+
 /-- Handle adaptive verification request using optimization -/
 def handleVerifyAdaptive (req : VerifyAdaptiveRequest) : Json :=
   let box : Box := req.box.toList.map RawInterval.toInterval
@@ -1348,13 +1514,15 @@ def handleGetInfo : Json :=
         ("resolved_revision", toJson LeanCert.Bridge.BuildInfo.leanCertResolvedRevision)
       ])
     ]),
-    ("certificate_schemas", toJson [boundCertificateSchema, adaptiveCertificateSchema]),
+    ("certificate_schemas", toJson [
+      boundCertificateSchema, adaptiveCertificateSchema, krawczykCertificateSchema]),
     ("verification_routes", toJson ["compiled_checker"]),
     ("operations", toJson [
       "ping", "get_info", "eval_interval", "eval_interval_dyadic",
       "eval_interval_affine", "global_min", "global_max", "global_min_dyadic",
       "global_max_dyadic", "global_min_affine", "global_max_affine", "check_bound",
       "integrate", "find_roots", "find_unique_root", "verify_adaptive",
+      "check_unique_system_root",
       "forward_interval", "deriv_interval"
     ]),
     ("capabilities", Json.mkObj [
@@ -1375,6 +1543,16 @@ def handleGetInfo : Json :=
         ("verification_routes", toJson ["compiled_checker"]),
         ("outcomes", toJson ["verified", "inconclusive", "unsupported", "domain_obstruction"]),
         ("backends", toJson ["rational_checked_global_optimization"])
+      ]),
+      ("check_unique_system_root", Json.mkObj [
+        ("schema_version", toJson "2.3"),
+        ("request_schema", toJson systemRootRequestSchema),
+        ("result_schema", toJson systemRootOutcomeSchema),
+        ("certificate_schemas", toJson [krawczykCertificateSchema]),
+        ("verification_routes", toJson ["compiled_checker"]),
+        ("outcomes", toJson ["verified", "candidate_rejected", "unsupported"]),
+        ("backends", toJson ["rational_krawczyk"]),
+        ("maximum_dimension", toJson 4)
       ])
     ]),
     ("expression_nodes", toJson [
@@ -1484,6 +1662,12 @@ def processRequest (line : String) : IO Unit := do
           match fromJson? (α := VerifyAdaptiveRequest) args with
           | Except.ok req => Json.mkObj [("result", handleVerifyAdaptive req)]
           | Except.error e => protocolError "invalid_params" s!"Invalid verify_adaptive params: {e}"
+
+        | "check_unique_system_root" =>
+          match fromJson? (α := CheckUniqueSystemRootRequest) args with
+          | Except.ok req => Json.mkObj [("result", handleCheckUniqueSystemRoot req)]
+          | Except.error e =>
+              protocolError "invalid_params" s!"Invalid check_unique_system_root params: {e}"
 
         | "forward_interval" =>
           match fromJson? (α := ForwardIntervalRequest) args with

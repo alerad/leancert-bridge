@@ -1,4 +1,4 @@
-# Bridge Contract 2.1
+# Bridge Contract 2.3
 
 LeanCert Bridge uses one line-delimited JSON request and response per operation.
 It is not JSON-RPC 2.0. Every valid request has an `id`, `method`, and `params`;
@@ -12,7 +12,9 @@ new operations increment the minor version. Removing fields or changing their
 meaning requires a major version. Contract 2.0 introduces structured errors,
 immutable build provenance, and explicit per-operation schema identities.
 Contract 2.1 adds replayable checked-bound payloads and resolved dependency
-identities. It is an additive minor release of Contract 2.
+identities. Contract 2.2 adds checked adaptive-bound outcomes. Contract 2.3
+adds checked unique nonlinear-system roots through rational Krawczyk
+certificates. These are additive minor releases of Contract 2.
 
 ## Handshake
 
@@ -49,10 +51,12 @@ Checked mathematical non-success is a tagged result:
 - `inconclusive`: the checked enclosure was insufficient;
 - `unsupported`: no advertised checked route supports the request;
 - `domain_obstruction`: a partial operation could not be certified on the domain.
+- `candidate_rejected`: a well-formed untrusted candidate failed its checker.
 
-Only `check_bound` currently advertises a typed checked capability. Other
-operations remain available as computational/discovery endpoints, but clients
-must not infer theorem authority from their untagged result dictionaries.
+`check_bound`, `verify_adaptive`, and `check_unique_system_root` advertise typed
+checked capabilities. Other operations remain available as computational or
+discovery endpoints, but clients must not infer theorem authority from their
+untagged result dictionaries.
 
 `check_bound` retains `verified`, `computed_lo`, and `computed_hi` for migration
 and additionally returns `status`, `direction`, `enclosure`, `backend`, and a
@@ -74,6 +78,24 @@ Derived request nodes such as subtraction, division, and powers are lowered in
 the replay payload exactly as they were before checking. Clients may compute a
 canonical digest of this payload for identity, but must not synthesize or alter
 the payload and still describe it as bridge-issued evidence.
+
+### Checked unique system roots
+
+Contract 2.3 advertises `check_unique_system_root` with request schema
+`check-unique-system-root-request/1`, result schema
+`unique-system-root-outcome/1`, and certificate schema `krawczyk-check/1`.
+
+The request contains a square system of supported expressions, an exact
+rational box, fixed search limits, and optionally an exact rational center and
+preconditioner supplied by an external numerical solver. Automatic search and
+supplied candidates are both untrusted. The bridge reconstructs the selected
+`KrawczykCert`, evaluates `LeanCert.Engine.krawczykCheck`, and emits `verified`
+only when that checker returns true. The retained verifier identity is
+`LeanCert.Validity.verify_unique_system_root`.
+
+Expected search failures are typed as `candidate_rejected` or `unsupported`;
+malformed dimensions and matrices are protocol errors. A rejected candidate
+never carries a certificate.
 
 ## Input validity
 
