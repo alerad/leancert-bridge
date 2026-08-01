@@ -63,19 +63,22 @@ open Lean
 /-! ## 1. Serialization Helpers -/
 
 /-- Bridge contract API version. Major bumps are breaking. -/
-def bridgeApiVersion : String := "2.0.0"
+def bridgeApiVersion : String := "2.1.0"
 
 /-- Bridge binary version (decoupled from API version). -/
-def bridgeVersion : String := "0.3.0"
+def bridgeVersion : String := "0.4.0"
 
 /-- Lean toolchain version used to build this bridge binary. -/
 def leanVersion : String := Lean.versionString
 
 /-- LeanCert release selected by `lakefile.toml`. -/
-def leanCertVersion : String := "4.31.0"
+def leanCertVersion : String := "4.32.2.3"
 
 /-- Certificate/result schema emitted by checked bound operations. -/
-def boundCertificateSchema : String := "bound-check/1"
+def boundCertificateSchema : String := "bound-check/2"
+
+/-- Exact checker-input schema embedded in replayable bound certificates. -/
+def boundReplayPayloadSchema : String := "global-opt-bound-replay/1"
 
 /-- Stable request and outcome schemas for the checked bound operation. -/
 def boundRequestSchema : String := "check-bound-request/1"
@@ -209,7 +212,7 @@ instance : ToJson RawDyadicConfig where
 
 /-- Convert RawDyadicConfig to DyadicConfig -/
 def RawDyadicConfig.toDyadicConfig (r : RawDyadicConfig) : DyadicConfig :=
-  { precision := r.precision, taylorDepth := r.taylorDepth, roundAfterOps := r.roundAfterOps }
+  { precision := r.precision, taylorDepth := r.taylorDepth }
 
 /-! ### Affine Config Serialization -/
 
@@ -343,6 +346,35 @@ partial def rawExprFromJson (j : Json) : Except String LExpr := do
 
 instance : FromJson LExpr where
   fromJson? := rawExprFromJson
+
+/-- Canonical serialization of the expression value actually checked. Derived
+request syntax such as subtraction, division, powers, min, and max has already
+been lowered to LeanCert's core expression constructors at this boundary. -/
+partial def exprToJson : LExpr → Json
+  | .const q => Json.mkObj [("kind", toJson "const"), ("val", toJson (toRawRat q))]
+  | .var idx => Json.mkObj [("kind", toJson "var"), ("idx", toJson idx)]
+  | .add e₁ e₂ => Json.mkObj [
+      ("kind", toJson "add"), ("e1", exprToJson e₁), ("e2", exprToJson e₂)]
+  | .mul e₁ e₂ => Json.mkObj [
+      ("kind", toJson "mul"), ("e1", exprToJson e₁), ("e2", exprToJson e₂)]
+  | .neg e => Json.mkObj [("kind", toJson "neg"), ("e", exprToJson e)]
+  | .inv e => Json.mkObj [("kind", toJson "inv"), ("e", exprToJson e)]
+  | .exp e => Json.mkObj [("kind", toJson "exp"), ("e", exprToJson e)]
+  | .sin e => Json.mkObj [("kind", toJson "sin"), ("e", exprToJson e)]
+  | .cos e => Json.mkObj [("kind", toJson "cos"), ("e", exprToJson e)]
+  | .log e => Json.mkObj [("kind", toJson "log"), ("e", exprToJson e)]
+  | .atan e => Json.mkObj [("kind", toJson "atan"), ("e", exprToJson e)]
+  | .arsinh e => Json.mkObj [("kind", toJson "arsinh"), ("e", exprToJson e)]
+  | .atanh e => Json.mkObj [("kind", toJson "atanh"), ("e", exprToJson e)]
+  | .sinc e => Json.mkObj [("kind", toJson "sinc"), ("e", exprToJson e)]
+  | .erf e => Json.mkObj [("kind", toJson "erf"), ("e", exprToJson e)]
+  | .sinh e => Json.mkObj [("kind", toJson "sinh"), ("e", exprToJson e)]
+  | .cosh e => Json.mkObj [("kind", toJson "cosh"), ("e", exprToJson e)]
+  | .tanh e => Json.mkObj [("kind", toJson "tanh"), ("e", exprToJson e)]
+  | .sqrt e => Json.mkObj [("kind", toJson "sqrt"), ("e", exprToJson e)]
+  | .namedConst .pi => Json.mkObj [("kind", toJson "named_const"), ("name", toJson "pi")]
+  | .namedConst .eulerMascheroni =>
+      Json.mkObj [("kind", toJson "named_const"), ("name", toJson "euler_mascheroni")]
 
 /-- Reject requests whose expression refers to a coordinate absent from the box.
 Out-of-range variables must not be silently interpreted as zero at the protocol boundary. -/
@@ -650,12 +682,29 @@ instance : FromJson DerivIntervalRequest where
 
 /-! ## 4. Request Handlers -/
 
-def boundCertificateJson (checker verifier : String) : Json :=
+def boundReplayPayloadJson (req : CheckBoundRequest) (cfg : GlobalOptConfig) : Json :=
+  Json.mkObj [
+    ("schema_version", toJson boundReplayPayloadSchema),
+    ("expression", exprToJson req.expr),
+    ("box", toJson (req.box.map fun interval => toRawInterval interval.toInterval)),
+    ("bound", toJson (toRawRat req.bound.toRat)),
+    ("direction", toJson (if req.isUpperBound then "upper" else "lower")),
+    ("config", Json.mkObj [
+      ("max_iterations", toJson cfg.maxIterations),
+      ("tolerance", toJson (toRawRat cfg.tolerance)),
+      ("use_monotonicity", toJson cfg.useMonotonicity),
+      ("taylor_depth", toJson cfg.taylorDepth)
+    ])
+  ]
+
+def boundCertificateJson (req : CheckBoundRequest) (cfg : GlobalOptConfig)
+    (checker verifier : String) : Json :=
   Json.mkObj [
     ("schema_version", toJson boundCertificateSchema),
     ("checker", toJson checker),
     ("verifier", toJson verifier),
-    ("verification_route", toJson "compiled_checker")
+    ("verification_route", toJson "compiled_checker"),
+    ("payload", boundReplayPayloadJson req cfg)
   ]
 
 def boundEnclosureJson (lo hi : ℚ) : Json :=
@@ -672,7 +721,7 @@ def handleEvalInterval (req : EvalRequest) : Json :=
 
   -- Run computation using evaluator with division support
   let cfg : EvalConfig := { taylorDepth := req.taylorDepth }
-  let result := evalIntervalCoreWithDiv req.expr env cfg
+  let result := LeanCert.Internal.Rational.evalTotalCore req.expr env cfg
 
   -- Serialize result
   Json.mkObj [
@@ -699,7 +748,7 @@ def handleEvalIntervalDyadic (req : EvalDyadicRequest) : Json :=
     Core.IntervalDyadic.ofIntervalRat irat cfg.precision
 
   -- Run Dyadic evaluation
-  let result := evalIntervalDyadic req.expr dyadicEnv cfg
+  let result := LeanCert.Internal.Dyadic.evalUnchecked req.expr dyadicEnv cfg
 
   -- Convert result to rational for compatibility
   let resultRat := result.toIntervalRat
@@ -732,7 +781,7 @@ def handleEvalIntervalAffine (req : EvalAffineRequest) : Json :=
   let affineEnv := toAffineEnv intervals
 
   -- Run Affine evaluation
-  let result := evalIntervalAffine req.expr affineEnv cfg
+  let result := LeanCert.Internal.Affine.evalUnchecked req.expr affineEnv cfg
 
   -- Convert result to interval
   let resultInterval := result.toInterval
@@ -756,7 +805,7 @@ def handleGlobalMin (req : OptimizeRequest) : Json :=
     taylorDepth := req.taylorDepth
   }
 
-  let result := globalMinimizeCoreDiv req.expr box cfg
+  let result := globalMinimizeCore req.expr box cfg
 
   -- Include bestBox for counterexample concretization
   let bestBoxJson := Json.arr (result.bound.bestBox.map (fun i => toJson (toRawInterval i))).toArray
@@ -778,7 +827,7 @@ def handleGlobalMax (req : OptimizeRequest) : Json :=
     taylorDepth := req.taylorDepth
   }
 
-  let result := globalMaximizeCoreDiv req.expr box cfg
+  let result := globalMaximizeCore req.expr box cfg
 
   -- Include bestBox for counterexample concretization
   let bestBoxJson := Json.arr (result.bound.bestBox.map (fun i => toJson (toRawInterval i))).toArray
@@ -922,14 +971,14 @@ def handleCheckBound (req : CheckBoundRequest) : Json :=
     ("enclosure", boundEnclosureJson result.bound.lo result.bound.hi),
     ("backend", toJson "rational_global_optimization"),
     ("certificate", if verified then
-      boundCertificateJson checker verifier
+      boundCertificateJson req cfg checker verifier
       else Json.null)
   ]
 
 /-- Computable single-interval integration.
     Bounds the integral using interval arithmetic: width * f_bounds -/
 def integrateIntervalCore1 (e : LExpr) (I : IntervalRat) (cfg : EvalConfig := {}) : IntervalRat :=
-  let fBound := evalIntervalCoreWithDiv e (fun _ => I) cfg
+  let fBound := LeanCert.Internal.Rational.evalTotalCore e (fun _ => I) cfg
   IntervalRat.mul (IntervalRat.singleton I.width) fBound
 
 /-- Computable uniform partition integration -/
@@ -943,7 +992,7 @@ def integrateIntervalCore (e : LExpr) (I : IntervalRat) (n : Nat) (cfg : EvalCon
       if h : lo ≤ hi then { lo := lo, hi := hi, le := h }
       else IntervalRat.singleton lo
     parts.foldl (fun acc J =>
-      let fBound := evalIntervalCoreWithDiv e (fun _ => J) cfg
+      let fBound := LeanCert.Internal.Rational.evalTotalCore e (fun _ => J) cfg
       let contribution := IntervalRat.mul (IntervalRat.singleton J.width) fBound
       IntervalRat.add acc contribution
     ) (IntervalRat.singleton 0)
@@ -981,13 +1030,15 @@ def excludesZeroCore (I : IntervalRat) : Bool :=
 
 /-- Check if function has opposite signs at endpoints (computable) -/
 def signChangeCore (e : LExpr) (I : IntervalRat) (cfg : EvalConfig) : Bool :=
-  let flo := evalIntervalCoreWithDiv e (fun _ => IntervalRat.singleton I.lo) cfg
-  let fhi := evalIntervalCoreWithDiv e (fun _ => IntervalRat.singleton I.hi) cfg
+  let flo := LeanCert.Internal.Rational.evalTotalCore e
+    (fun _ => IntervalRat.singleton I.lo) cfg
+  let fhi := LeanCert.Internal.Rational.evalTotalCore e
+    (fun _ => IntervalRat.singleton I.hi) cfg
   (flo.hi < 0 && 0 < fhi.lo) || (fhi.hi < 0 && 0 < flo.lo)
 
 /-- Determine root status (computable) -/
 def checkRootStatusCore (e : LExpr) (I : IntervalRat) (cfg : EvalConfig) : RootStatusCore :=
-  let fI := evalIntervalCoreWithDiv e (fun _ => I) cfg
+  let fI := LeanCert.Internal.Rational.evalTotalCore e (fun _ => I) cfg
   if excludesZeroCore fI then
     RootStatusCore.noRoot
   else if signChangeCore e I cfg then
@@ -1144,7 +1195,15 @@ def handleVerifyAdaptive (req : VerifyAdaptiveRequest) : Json :=
     ("direction", toJson (if req.isUpperBound then "upper" else "lower")),
     ("enclosure", boundEnclosureJson result.bound.lo result.bound.hi),
     ("backend", toJson "rational_global_optimization"),
-    ("certificate", if verified then boundCertificateJson checker verifier else Json.null)
+    ("certificate", if verified then
+      boundCertificateJson {
+        expr := req.expr
+        box := req.box
+        bound := req.bound
+        isUpperBound := req.isUpperBound
+        taylorDepth := req.taylorDepth
+      } cfg checker verifier
+      else Json.null)
   ]
 
 /-- Handle neural network forward interval propagation request.
@@ -1230,6 +1289,16 @@ def handleGetInfo : Json :=
       ("environment_digest", toJson LeanCert.Bridge.BuildInfo.environmentDigest),
       ("profile", toJson LeanCert.Bridge.BuildInfo.profile)
     ]),
+    ("dependencies", Json.mkObj [
+      ("lean", Json.mkObj [
+        ("toolchain", toJson LeanCert.Bridge.BuildInfo.leanToolchain)
+      ]),
+      ("leancert", Json.mkObj [
+        ("source", toJson LeanCert.Bridge.BuildInfo.leanCertSource),
+        ("input_revision", toJson LeanCert.Bridge.BuildInfo.leanCertInputRevision),
+        ("resolved_revision", toJson LeanCert.Bridge.BuildInfo.leanCertResolvedRevision)
+      ])
+    ]),
     ("certificate_schemas", toJson [boundCertificateSchema]),
     ("verification_routes", toJson ["compiled_checker"]),
     ("operations", toJson [
@@ -1241,7 +1310,7 @@ def handleGetInfo : Json :=
     ]),
     ("capabilities", Json.mkObj [
       ("check_bound", Json.mkObj [
-        ("schema_version", toJson "2.0"),
+        ("schema_version", toJson "2.1"),
         ("request_schema", toJson boundRequestSchema),
         ("result_schema", toJson boundOutcomeSchema),
         ("certificate_schemas", toJson [boundCertificateSchema]),
