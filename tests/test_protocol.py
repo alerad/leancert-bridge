@@ -64,11 +64,16 @@ class BridgeContractTest(unittest.TestCase):
         result = self.call("get_info", {})["result"]
         self.assertEqual(result["protocol_name"], "leancert-line-json")
         self.assertEqual(result["framing"], "ndjson")
-        self.assertEqual(result["bridge_api_version"], "2.3.0")
-        self.assertEqual(result["protocol_version"], "2.3.0")
+        self.assertEqual(result["bridge_api_version"], "2.4.0")
+        self.assertEqual(result["protocol_version"], "2.4.0")
         self.assertEqual(
             result["certificate_schemas"],
-            ["bound-check/2", "adaptive-bound-check/1", "krawczyk-check/1"],
+            [
+                "bound-check/2",
+                "adaptive-bound-check/1",
+                "krawczyk-check/1",
+                "eventual-bound-check/1",
+            ],
         )
         self.assertIn("check_bound", result["operations"])
         self.assertIn("var", result["expression_nodes"])
@@ -88,6 +93,15 @@ class BridgeContractTest(unittest.TestCase):
         )
         self.assertEqual(system_root["certificate_schemas"], ["krawczyk-check/1"])
         self.assertEqual(system_root["maximum_dimension"], 4)
+        eventual = result["capabilities"]["check_eventual_bound"]
+        self.assertEqual(eventual["schema_version"], "2.4")
+        self.assertEqual(
+            eventual["request_schema"], "check-eventual-bound-request/1"
+        )
+        self.assertEqual(eventual["result_schema"], "eventual-bound-outcome/1")
+        self.assertEqual(
+            eventual["certificate_schemas"], ["eventual-bound-check/1"]
+        )
         self.assertEqual(
             set(result["build"]),
             {"source_revision", "source_digest", "environment_digest", "profile"},
@@ -316,6 +330,106 @@ class BridgeContractTest(unittest.TestCase):
         self.assertEqual(rejected["status"], "candidate_rejected")
         self.assertIsNone(rejected["certificate"])
         self.assertIsNotNone(rejected["search"]["failure"])
+
+    def test_eventual_bound_discovers_and_checks_exact_cutoff(self) -> None:
+        result = self.call(
+            "check_eventual_bound",
+            {
+                "coefficient": rat(3),
+                "bound": rat(1, 1000),
+                "exponent": 2,
+            },
+        )["result"]
+        self.assertTrue(result["verified"])
+        self.assertEqual(result["status"], "verified")
+        self.assertEqual(result["backend"], "rational_reciprocal_power")
+        self.assertEqual(result["cutoff"], 55)
+        self.assertEqual(result["search"]["source"], "automatic")
+        self.assertTrue(result["search"]["refinement_complete"])
+        certificate = result["certificate"]
+        self.assertEqual(certificate["schema_version"], "eventual-bound-check/1")
+        self.assertEqual(
+            certificate["checker"],
+            "LeanCert.Validity.checkReciprocalPowerUpper",
+        )
+        self.assertEqual(
+            certificate["verifier"],
+            "LeanCert.Validity.verify_reciprocal_power_upper",
+        )
+        self.assertEqual(
+            certificate["payload"],
+            {
+                "schema_version": "checked-eventual-bound/1",
+                "coefficient": rat(3),
+                "bound": rat(1, 1000),
+                "exponent": 2,
+                "cutoff": 55,
+            },
+        )
+
+    def test_eventual_bound_checks_supplied_cutoff_without_discovery(self) -> None:
+        accepted = self.call(
+            "check_eventual_bound",
+            {
+                "coefficient": rat(3),
+                "bound": rat(1, 1000),
+                "exponent": 2,
+                "cutoff": 100,
+            },
+        )["result"]
+        self.assertTrue(accepted["verified"])
+        self.assertEqual(accepted["cutoff"], 100)
+        self.assertEqual(accepted["search"], {"source": "provided"})
+
+        rejected = self.call(
+            "check_eventual_bound",
+            {
+                "coefficient": rat(3),
+                "bound": rat(1, 1000),
+                "exponent": 2,
+                "cutoff": 10,
+            },
+        )["result"]
+        self.assertFalse(rejected["verified"])
+        self.assertEqual(rejected["status"], "candidate_rejected")
+        self.assertEqual(rejected["failure"]["kind"], "rejected_cutoff")
+        self.assertIsNone(rejected["certificate"])
+
+    def test_eventual_bound_failures_are_typed(self) -> None:
+        unsupported = self.call(
+            "check_eventual_bound",
+            {
+                "coefficient": rat(-1),
+                "bound": rat(1),
+                "exponent": 2,
+            },
+        )["result"]
+        self.assertEqual(unsupported["status"], "unsupported")
+        self.assertEqual(unsupported["failure"]["kind"], "negative_coefficient")
+
+        impossible = self.call(
+            "check_eventual_bound",
+            {
+                "coefficient": rat(1),
+                "bound": rat(0),
+                "exponent": 2,
+            },
+        )["result"]
+        self.assertEqual(impossible["status"], "candidate_rejected")
+        self.assertEqual(impossible["failure"]["kind"], "impossible_bound")
+
+        exhausted = self.call(
+            "check_eventual_bound",
+            {
+                "coefficient": rat(3),
+                "bound": rat(1, 1000),
+                "exponent": 2,
+                "maxChecks": 1,
+            },
+        )["result"]
+        self.assertEqual(exhausted["status"], "inconclusive")
+        self.assertEqual(exhausted["failure"]["kind"], "search_exhausted")
+        self.assertIsNone(exhausted["certificate"])
 
     def test_replay_payload_uses_the_lowered_checked_expression(self) -> None:
         verified = self.call(

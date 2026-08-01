@@ -14,6 +14,7 @@ import LeanCert.Engine.Optimization.Gradient
 import LeanCert.Engine.Integrate
 import LeanCert.Engine.RootFinding.KrawczykCandidate
 import LeanCert.Validity.Bounds
+import LeanCert.Validity.Eventual
 import LeanCert.ML.Distillation
 
 /-!
@@ -64,7 +65,7 @@ open Lean
 /-! ## 1. Serialization Helpers -/
 
 /-- Bridge contract API version. Major bumps are breaking. -/
-def bridgeApiVersion : String := "2.3.0"
+def bridgeApiVersion : String := "2.4.0"
 
 /-- Bridge binary version (decoupled from API version). -/
 def bridgeVersion : String := "0.5.0"
@@ -89,6 +90,10 @@ def adaptiveReplayPayloadSchema : String := "checked-global-opt-bound/1"
 def krawczykCertificateSchema : String := "krawczyk-check/1"
 def krawczykReplayPayloadSchema : String := "checked-unique-system-root/1"
 
+/-- Retained fixed checker input for reciprocal-power eventual bounds. -/
+def eventualCertificateSchema : String := "eventual-bound-check/1"
+def eventualReplayPayloadSchema : String := "checked-eventual-bound/1"
+
 /-- Stable request and outcome schemas for the checked bound operation. -/
 def boundRequestSchema : String := "check-bound-request/1"
 def boundOutcomeSchema : String := "bound-outcome/1"
@@ -96,6 +101,8 @@ def adaptiveRequestSchema : String := "verify-adaptive-request/1"
 def adaptiveOutcomeSchema : String := "adaptive-bound-outcome/1"
 def systemRootRequestSchema : String := "check-unique-system-root-request/1"
 def systemRootOutcomeSchema : String := "unique-system-root-outcome/1"
+def eventualRequestSchema : String := "check-eventual-bound-request/1"
+def eventualOutcomeSchema : String := "eventual-bound-outcome/1"
 
 /-- Raw rational for JSON IO. Uses Int numerator and Nat denominator. -/
 structure RawRat where
@@ -598,6 +605,79 @@ instance : FromJson CheckUniqueSystemRootRequest where
     let taylorDepth := (j.getObjValAs? Nat "taylorDepth").toOption.getD 10
     return { system, box, candidate, maxIterations, maxDimension, precisionBits, taylorDepth }
 
+/-- Checked reciprocal-power eventual-bound request. Cutoff discovery is
+    untrusted; only `checkReciprocalPowerUpper` controls verification. -/
+structure CheckEventualBoundRequest where
+  coefficient : RawRat
+  bound : RawRat
+  exponent : Nat
+  cutoff : Option Nat := none
+  maxChecks : Nat := 1000
+  deriving Repr, Inhabited
+
+instance : FromJson CheckEventualBoundRequest where
+  fromJson? j := do
+    let coefficient ← j.getObjValAs? RawRat "coefficient"
+    let bound ← j.getObjValAs? RawRat "bound"
+    let exponent ← j.getObjValAs? Nat "exponent"
+    let cutoff ← match j.getObjVal? "cutoff" with
+      | Except.error _ => pure none
+      | Except.ok Json.null => pure none
+      | Except.ok value => some <$> FromJson.fromJson? value
+    let maxChecks := (j.getObjValAs? Nat "maxChecks").toOption.getD 1000
+    if maxChecks = 0 then throw "maxChecks must be positive"
+    return { coefficient, bound, exponent, cutoff, maxChecks }
+
+/-- Telemetry from untrusted bridge-side cutoff discovery. -/
+structure EventualSearchStatistics where
+  cutoff : Nat
+  checks : Nat
+  configuredLimit : Nat
+  exponentialSteps : Nat
+  refinementSteps : Nat
+  lowerBracket : Nat
+  upperBracket : Nat
+  refinementComplete : Bool
+  deriving Repr, Inhabited
+
+private partial def exponentialCutoffSearch (q bound : ℚ) (k : Nat)
+    (limit checks lo hi steps : Nat) : Except (Nat × Nat) (Nat × Nat × Nat × Nat) :=
+  if checks ≥ limit then .error (checks, lo)
+  else if LeanCert.Validity.checkReciprocalPowerUpper q bound k hi then
+    .ok (lo, hi, checks + 1, steps + 1)
+  else exponentialCutoffSearch q bound k limit (checks + 1) hi (2 * hi) (steps + 1)
+
+private partial def refineCutoff (q bound : ℚ) (k limit : Nat)
+    (checks lo hi steps : Nat) : Nat × Nat × Nat × Nat × Bool :=
+  if lo + 1 ≥ hi then (lo, hi, checks, steps, true)
+  else if checks ≥ limit then (lo, hi, checks, steps, false)
+  else
+    let mid := (lo + hi) / 2
+    if LeanCert.Validity.checkReciprocalPowerUpper q bound k mid then
+      refineCutoff q bound k limit (checks + 1) lo mid (steps + 1)
+    else
+      refineCutoff q bound k limit (checks + 1) mid hi (steps + 1)
+
+/-- Deterministic but untrusted cutoff discovery. Its output must always be
+    replayed through `checkReciprocalPowerUpper`. -/
+def discoverEventualCutoff (q bound : ℚ) (k maxChecks : Nat) :
+    Except (Nat × Nat) EventualSearchStatistics := do
+  if LeanCert.Validity.checkReciprocalPowerUpper q bound k 1 then
+    return {
+      cutoff := 1, checks := 1, configuredLimit := maxChecks,
+      exponentialSteps := 0, refinementSteps := 0,
+      lowerBracket := 0, upperBracket := 1, refinementComplete := true
+    }
+  let (lo, hi, checks, exponentialSteps) ←
+    exponentialCutoffSearch q bound k maxChecks 1 1 2 0
+  let (lo, hi, checks, refinementSteps, complete) :=
+    refineCutoff q bound k maxChecks checks lo hi 0
+  return {
+    cutoff := hi, checks, configuredLimit := maxChecks, exponentialSteps,
+    refinementSteps, lowerBracket := lo, upperBracket := hi,
+    refinementComplete := complete
+  }
+
 /-- Request for adaptive verification using optimization -/
 structure VerifyAdaptiveRequest where
   expr : LExpr
@@ -848,6 +928,21 @@ def krawczykCertificateJson (req : CheckUniqueSystemRootRequest)
       ("center", ratListJson center),
       ("preconditioner", ratMatrixJson preconditioner),
       ("config", Json.mkObj [("taylor_depth", toJson req.taylorDepth)])
+    ])
+  ]
+
+def eventualCertificateJson (req : CheckEventualBoundRequest) (cutoff : Nat) : Json :=
+  Json.mkObj [
+    ("schema_version", toJson eventualCertificateSchema),
+    ("checker", toJson "LeanCert.Validity.checkReciprocalPowerUpper"),
+    ("verifier", toJson "LeanCert.Validity.verify_reciprocal_power_upper"),
+    ("verification_route", toJson "compiled_checker"),
+    ("payload", Json.mkObj [
+      ("schema_version", toJson eventualReplayPayloadSchema),
+      ("coefficient", toJson (toRawRat req.coefficient.toRat)),
+      ("bound", toJson (toRawRat req.bound.toRat)),
+      ("exponent", toJson req.exponent),
+      ("cutoff", toJson cutoff)
     ])
   ]
 
@@ -1349,6 +1444,90 @@ def handleCheckUniqueSystemRoot (req : CheckUniqueSystemRootRequest) : Json :=
       else Json.null)
   ]
 
+def eventualSearchJson (statistics : EventualSearchStatistics) : Json :=
+  Json.mkObj [
+    ("source", toJson "automatic"),
+    ("checks", toJson statistics.checks),
+    ("configured_limit", toJson statistics.configuredLimit),
+    ("exponential_steps", toJson statistics.exponentialSteps),
+    ("refinement_steps", toJson statistics.refinementSteps),
+    ("lower_bracket", toJson statistics.lowerBracket),
+    ("upper_bracket", toJson statistics.upperBracket),
+    ("refinement_complete", toJson statistics.refinementComplete)
+  ]
+
+def fixedEventualSearchJson : Json :=
+  Json.mkObj [("source", toJson "provided")]
+
+def requestedEventualSearchJson (cutoff : Option Nat) : Json :=
+  Json.mkObj [("source", toJson (if cutoff.isSome then "provided" else "automatic"))]
+
+def eventualFailureJson (kind detail : String) : Json :=
+  Json.mkObj [("kind", toJson kind), ("detail", toJson detail)]
+
+/-- Check a supplied cutoff or discover one using LeanCert's deterministic,
+    untrusted search. Every successful candidate is replayed through the exact
+    reciprocal-power checker before a certificate is emitted. -/
+def handleCheckEventualBound (req : CheckEventualBoundRequest) : Json :=
+  let q := req.coefficient.toRat
+  let bound := req.bound.toRat
+  let checked (cutoff : Nat) :=
+    LeanCert.Validity.checkReciprocalPowerUpper q bound req.exponent cutoff
+  let outcome (status : String) (cutoff : Option Nat) (search failure certificate : Json) :=
+    Json.mkObj [
+      ("verified", toJson (status == "verified")),
+      ("status", toJson status),
+      ("backend", toJson "rational_reciprocal_power"),
+      ("cutoff", cutoff.map toJson |>.getD Json.null),
+      ("search", search),
+      ("failure", failure),
+      ("certificate", certificate)
+    ]
+  if q < 0 then
+    outcome "unsupported" req.cutoff (requestedEventualSearchJson req.cutoff)
+      (eventualFailureJson "negative_coefficient"
+        "the supported tail language requires a nonnegative coefficient") Json.null
+  else if req.exponent = 0 then
+    outcome "unsupported" req.cutoff (requestedEventualSearchJson req.cutoff)
+      (eventualFailureJson "nonpositive_exponent"
+        "the supported tail language requires a positive exponent") Json.null
+  else match req.cutoff with
+    | some cutoff =>
+        if checked cutoff then
+          outcome "verified" (some cutoff) fixedEventualSearchJson Json.null
+            (eventualCertificateJson req cutoff)
+        else
+          outcome "candidate_rejected" (some cutoff) fixedEventualSearchJson
+            (eventualFailureJson "rejected_cutoff"
+              s!"the exact checker rejected cutoff {cutoff}") Json.null
+    | none =>
+        if bound < 0 || (0 < q && bound = 0) then
+          outcome "candidate_rejected" none
+            (Json.mkObj [("source", toJson "automatic")])
+            (eventualFailureJson "impossible_bound"
+              "a nonnegative reciprocal-power tail cannot satisfy this upper bound") Json.null
+        else match discoverEventualCutoff q bound req.exponent req.maxChecks with
+          | .ok statistics =>
+              if checked statistics.cutoff then
+                outcome "verified" (some statistics.cutoff)
+                  (eventualSearchJson statistics) Json.null
+                  (eventualCertificateJson req statistics.cutoff)
+              else
+                outcome "candidate_rejected" (some statistics.cutoff)
+                  (eventualSearchJson statistics)
+                  (eventualFailureJson "rejected_discovered_cutoff"
+                    "the exact checker rejected the discovered cutoff") Json.null
+          | .error (checks, lastCutoff) =>
+              outcome "inconclusive" none
+                (Json.mkObj [
+                  ("source", toJson "automatic"),
+                  ("checks", toJson checks),
+                  ("configured_limit", toJson req.maxChecks),
+                  ("last_cutoff", toJson lastCutoff)
+                ])
+                (eventualFailureJson "search_exhausted"
+                  "cutoff discovery exhausted its configured check budget") Json.null
+
 /-- Handle adaptive verification request using optimization -/
 def handleVerifyAdaptive (req : VerifyAdaptiveRequest) : Json :=
   let box : Box := req.box.toList.map RawInterval.toInterval
@@ -1515,14 +1694,15 @@ def handleGetInfo : Json :=
       ])
     ]),
     ("certificate_schemas", toJson [
-      boundCertificateSchema, adaptiveCertificateSchema, krawczykCertificateSchema]),
+      boundCertificateSchema, adaptiveCertificateSchema, krawczykCertificateSchema,
+      eventualCertificateSchema]),
     ("verification_routes", toJson ["compiled_checker"]),
     ("operations", toJson [
       "ping", "get_info", "eval_interval", "eval_interval_dyadic",
       "eval_interval_affine", "global_min", "global_max", "global_min_dyadic",
       "global_max_dyadic", "global_min_affine", "global_max_affine", "check_bound",
       "integrate", "find_roots", "find_unique_root", "verify_adaptive",
-      "check_unique_system_root",
+      "check_unique_system_root", "check_eventual_bound",
       "forward_interval", "deriv_interval"
     ]),
     ("capabilities", Json.mkObj [
@@ -1553,6 +1733,16 @@ def handleGetInfo : Json :=
         ("outcomes", toJson ["verified", "candidate_rejected", "unsupported"]),
         ("backends", toJson ["rational_krawczyk"]),
         ("maximum_dimension", toJson 4)
+      ]),
+      ("check_eventual_bound", Json.mkObj [
+        ("schema_version", toJson "2.4"),
+        ("request_schema", toJson eventualRequestSchema),
+        ("result_schema", toJson eventualOutcomeSchema),
+        ("certificate_schemas", toJson [eventualCertificateSchema]),
+        ("verification_routes", toJson ["compiled_checker"]),
+        ("outcomes", toJson ["verified", "candidate_rejected", "inconclusive", "unsupported"]),
+        ("backends", toJson ["rational_reciprocal_power"]),
+        ("tail_family", toJson "nonnegative_rational_reciprocal_power_upper")
       ])
     ]),
     ("expression_nodes", toJson [
@@ -1668,6 +1858,12 @@ def processRequest (line : String) : IO Unit := do
           | Except.ok req => Json.mkObj [("result", handleCheckUniqueSystemRoot req)]
           | Except.error e =>
               protocolError "invalid_params" s!"Invalid check_unique_system_root params: {e}"
+
+        | "check_eventual_bound" =>
+          match fromJson? (α := CheckEventualBoundRequest) args with
+          | Except.ok req => Json.mkObj [("result", handleCheckEventualBound req)]
+          | Except.error e =>
+              protocolError "invalid_params" s!"Invalid check_eventual_bound params: {e}"
 
         | "forward_interval" =>
           match fromJson? (α := ForwardIntervalRequest) args with

@@ -17,8 +17,10 @@ Only operations listed under the handshake's `capabilities` object are typed
 checked APIs. Other advertised operations are computational or discovery
 endpoints. See [BRIDGE_CONTRACT.md](BRIDGE_CONTRACT.md).
 
-Checked capabilities currently cover fixed bounds, adaptive bounds, and unique
-nonlinear-system roots certified by exact rational Krawczyk certificates.
+Checked capabilities currently cover fixed bounds, adaptive bounds, unique
+nonlinear-system roots certified by exact rational Krawczyk certificates, and
+reciprocal-power eventual bounds with supplied or automatically discovered
+cutoffs.
 
 ## Local Build
 

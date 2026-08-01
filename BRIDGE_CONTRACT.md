@@ -1,4 +1,4 @@
-# Bridge Contract 2.3
+# Bridge Contract 2.4
 
 LeanCert Bridge uses one line-delimited JSON request and response per operation.
 It is not JSON-RPC 2.0. Every valid request has an `id`, `method`, and `params`;
@@ -14,7 +14,9 @@ immutable build provenance, and explicit per-operation schema identities.
 Contract 2.1 adds replayable checked-bound payloads and resolved dependency
 identities. Contract 2.2 adds checked adaptive-bound outcomes. Contract 2.3
 adds checked unique nonlinear-system roots through rational Krawczyk
-certificates. These are additive minor releases of Contract 2.
+certificates. Contract 2.4 adds checked reciprocal-power eventual bounds with
+supplied or automatically discovered cutoffs. These are additive minor
+releases of Contract 2.
 
 ## Handshake
 
@@ -53,10 +55,10 @@ Checked mathematical non-success is a tagged result:
 - `domain_obstruction`: a partial operation could not be certified on the domain.
 - `candidate_rejected`: a well-formed untrusted candidate failed its checker.
 
-`check_bound`, `verify_adaptive`, and `check_unique_system_root` advertise typed
-checked capabilities. Other operations remain available as computational or
-discovery endpoints, but clients must not infer theorem authority from their
-untagged result dictionaries.
+`check_bound`, `verify_adaptive`, `check_unique_system_root`, and
+`check_eventual_bound` advertise typed checked capabilities. Other operations
+remain available as computational or discovery endpoints, but clients must not
+infer theorem authority from their untagged result dictionaries.
 
 `check_bound` retains `verified`, `computed_lo`, and `computed_hi` for migration
 and additionally returns `status`, `direction`, `enclosure`, `backend`, and a
@@ -96,6 +98,26 @@ only when that checker returns true. The retained verifier identity is
 Expected search failures are typed as `candidate_rejected` or `unsupported`;
 malformed dimensions and matrices are protocol errors. A rejected candidate
 never carries a certificate.
+
+### Checked eventual bounds
+
+Contract 2.4 advertises `check_eventual_bound` with request schema
+`check-eventual-bound-request/1`, result schema `eventual-bound-outcome/1`, and
+certificate schema `eventual-bound-check/1`.
+
+The initial language is deliberately narrow: nonnegative rational `q`, a
+positive natural exponent `k`, and an exact rational upper bound `c` for the
+tail `q / (n : ℝ)^k`. A request may supply a positive natural cutoff or ask
+the bridge to run LeanCert's bounded exponential search and binary refinement.
+Search is untrusted. The bridge emits `verified` only after replaying the final
+cutoff through `LeanCert.Validity.checkReciprocalPowerUpper`; the retained
+Golden Theorem is `LeanCert.Validity.verify_reciprocal_power_upper`.
+
+The certificate payload records only the exact fixed checker inputs. Search
+telemetry records whether the cutoff was supplied or discovered and, for
+discovery, its budget, checks, bracket, refinement steps, and completion state.
+Rejected supplied cutoffs are `candidate_rejected`; budget exhaustion is
+`inconclusive`; tails outside the advertised language are `unsupported`.
 
 ## Input validity
 
