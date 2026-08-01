@@ -43,7 +43,11 @@ Windows long paths.
 
 ## Releases
 
-Tag format: `bridge-vX.Y.Z`
+Tag format: `vLEAN_MAJOR.LEAN_MINOR.LEAN_PATCH.BRIDGE_REVISION`
+
+The first three components exactly match `lean-toolchain`; the final component
+counts bridge releases for that toolchain, starting at `1`. For example, the
+first bridge release built with Lean `v4.32.2` is tagged `v4.32.2.1`.
 
 On tag push, CI builds platform binaries and publishes GitHub release assets:
 
