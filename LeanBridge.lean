@@ -63,7 +63,7 @@ open Lean
 /-! ## 1. Serialization Helpers -/
 
 /-- Bridge contract API version. Major bumps are breaking. -/
-def bridgeApiVersion : String := "2.1.0"
+def bridgeApiVersion : String := "2.2.0"
 
 /-- Bridge binary version (decoupled from API version). -/
 def bridgeVersion : String := "0.4.0"
@@ -80,9 +80,15 @@ def boundCertificateSchema : String := "bound-check/2"
 /-- Exact checker-input schema embedded in replayable bound certificates. -/
 def boundReplayPayloadSchema : String := "global-opt-bound-replay/1"
 
+/-- Retained input/result schema for the checked adaptive optimizer. -/
+def adaptiveCertificateSchema : String := "adaptive-bound-check/1"
+def adaptiveReplayPayloadSchema : String := "checked-global-opt-bound/1"
+
 /-- Stable request and outcome schemas for the checked bound operation. -/
 def boundRequestSchema : String := "check-bound-request/1"
 def boundOutcomeSchema : String := "bound-outcome/1"
+def adaptiveRequestSchema : String := "verify-adaptive-request/1"
+def adaptiveOutcomeSchema : String := "adaptive-bound-outcome/1"
 
 /-- Raw rational for JSON IO. Uses Int numerator and Nat denominator. -/
 structure RawRat where
@@ -707,6 +713,32 @@ def boundCertificateJson (req : CheckBoundRequest) (cfg : GlobalOptConfig)
     ("payload", boundReplayPayloadJson req cfg)
   ]
 
+def adaptiveCertificateJson (req : VerifyAdaptiveRequest) (cfg : GlobalOptConfig)
+    (result : GlobalResult) (checker verifier : String) : Json :=
+  Json.mkObj [
+    ("schema_version", toJson adaptiveCertificateSchema),
+    ("checker", toJson checker),
+    ("verifier", toJson verifier),
+    ("verification_route", toJson "compiled_checker"),
+    ("payload", Json.mkObj [
+      ("schema_version", toJson adaptiveReplayPayloadSchema),
+      ("expression", exprToJson req.expr),
+      ("box", toJson (req.box.map fun interval => toRawInterval interval.toInterval)),
+      ("bound", toJson (toRawRat req.bound.toRat)),
+      ("direction", toJson (if req.isUpperBound then "upper" else "lower")),
+      ("candidate_enclosure", Json.mkObj [
+        ("lo", toJson (toRawRat result.bound.lo)),
+        ("hi", toJson (toRawRat result.bound.hi))
+      ]),
+      ("config", Json.mkObj [
+        ("max_iterations", toJson cfg.maxIterations),
+        ("tolerance", toJson (toRawRat cfg.tolerance)),
+        ("use_monotonicity", toJson cfg.useMonotonicity),
+        ("taylor_depth", toJson cfg.taylorDepth)
+      ])
+    ])
+  ]
+
 def boundEnclosureJson (lo hi : ℚ) : Json :=
   Json.mkObj [
     ("lo", toJson (toRawRat lo)),
@@ -1164,47 +1196,64 @@ def handleVerifyAdaptive (req : VerifyAdaptiveRequest) : Json :=
   let env : IntervalEnv := fun i => box.getD i (IntervalRat.singleton 0)
   let domainValid := checkDomainValid req.expr env { taylorDepth := req.taylorDepth }
   let supported := isGloballyOptimizable req.expr
-  let result := if req.isUpperBound then
-    globalMaximizeCore req.expr box cfg
-  else
-    globalMinimizeCore req.expr box cfg
-  let inequality := if req.isUpperBound then
-    decide (result.bound.hi ≤ bound)
-  else
-    decide (bound ≤ result.bound.lo)
-  let verified := supported && domainValid && inequality
-  let status := if !supported then "unsupported"
-    else if !domainValid then "domain_obstruction"
-    else if verified then "verified" else "inconclusive"
-  let gap := if req.isUpperBound then bound - result.bound.hi
-    else result.bound.lo - bound
   let checker := if req.isUpperBound then
-    "LeanCert.Validity.GlobalOpt.checkGlobalUpperBound"
+    "LeanCert.Engine.Optimization.globalMaximizeRationalChecked"
   else
-    "LeanCert.Validity.GlobalOpt.checkGlobalLowerBound"
+    "LeanCert.Engine.Optimization.globalMinimizeRationalChecked"
   let verifier := if req.isUpperBound then
-    "LeanCert.Validity.GlobalOpt.verify_global_upper_bound"
+    "LeanCert.Engine.Optimization.globalMaximizeRationalChecked_hi_correct"
   else
-    "LeanCert.Validity.GlobalOpt.verify_global_lower_bound"
-
-  Json.mkObj [
-    ("verified", toJson verified),
-    ("minValue", toJson (toRawRat gap)),
-    ("remainingBoxes", toJson result.remainingBoxes.length),
-    ("status", toJson status),
-    ("direction", toJson (if req.isUpperBound then "upper" else "lower")),
-    ("enclosure", boundEnclosureJson result.bound.lo result.bound.hi),
-    ("backend", toJson "rational_global_optimization"),
-    ("certificate", if verified then
-      boundCertificateJson {
-        expr := req.expr
-        box := req.box
-        bound := req.bound
-        isUpperBound := req.isUpperBound
-        taylorDepth := req.taylorDepth
-      } cfg checker verifier
-      else Json.null)
-  ]
+    "LeanCert.Engine.Optimization.globalMinimizeRationalChecked_lo_correct"
+  if !supported then
+    Json.mkObj [
+      ("verified", toJson false),
+      ("status", toJson "unsupported"),
+      ("direction", toJson (if req.isUpperBound then "upper" else "lower")),
+      ("backend", toJson "rational_checked_global_optimization"),
+      ("certificate", Json.null)
+    ]
+  else if !domainValid then
+    Json.mkObj [
+      ("verified", toJson false),
+      ("status", toJson "domain_obstruction"),
+      ("direction", toJson (if req.isUpperBound then "upper" else "lower")),
+      ("backend", toJson "rational_checked_global_optimization"),
+      ("certificate", Json.null)
+    ]
+  else
+    let checked := if req.isUpperBound then
+      globalMaximizeRationalChecked req.expr box cfg
+    else
+      globalMinimizeRationalChecked req.expr box cfg
+    match checked with
+    | .error failure =>
+      Json.mkObj [
+        ("verified", toJson false),
+        ("status", toJson "inconclusive"),
+        ("direction", toJson (if req.isUpperBound then "upper" else "lower")),
+        ("backend", toJson "rational_checked_global_optimization"),
+        ("failure", toJson (reprStr failure)),
+        ("certificate", Json.null)
+      ]
+    | .ok result =>
+      let inequality := if req.isUpperBound then
+        decide (result.bound.hi ≤ bound)
+      else
+        decide (bound ≤ result.bound.lo)
+      let gap := if req.isUpperBound then bound - result.bound.hi
+        else result.bound.lo - bound
+      Json.mkObj [
+        ("verified", toJson inequality),
+        ("minValue", toJson (toRawRat gap)),
+        ("remainingBoxes", toJson result.remainingBoxes.length),
+        ("status", toJson (if inequality then "verified" else "inconclusive")),
+        ("direction", toJson (if req.isUpperBound then "upper" else "lower")),
+        ("enclosure", boundEnclosureJson result.bound.lo result.bound.hi),
+        ("backend", toJson "rational_checked_global_optimization"),
+        ("certificate", if inequality then
+          adaptiveCertificateJson req cfg result checker verifier
+          else Json.null)
+      ]
 
 /-- Handle neural network forward interval propagation request.
 
@@ -1299,7 +1348,7 @@ def handleGetInfo : Json :=
         ("resolved_revision", toJson LeanCert.Bridge.BuildInfo.leanCertResolvedRevision)
       ])
     ]),
-    ("certificate_schemas", toJson [boundCertificateSchema]),
+    ("certificate_schemas", toJson [boundCertificateSchema, adaptiveCertificateSchema]),
     ("verification_routes", toJson ["compiled_checker"]),
     ("operations", toJson [
       "ping", "get_info", "eval_interval", "eval_interval_dyadic",
@@ -1317,6 +1366,15 @@ def handleGetInfo : Json :=
         ("verification_routes", toJson ["compiled_checker"]),
         ("outcomes", toJson ["verified", "inconclusive", "unsupported", "domain_obstruction"]),
         ("backends", toJson ["rational_global_optimization"])
+      ]),
+      ("verify_adaptive", Json.mkObj [
+        ("schema_version", toJson "2.2"),
+        ("request_schema", toJson adaptiveRequestSchema),
+        ("result_schema", toJson adaptiveOutcomeSchema),
+        ("certificate_schemas", toJson [adaptiveCertificateSchema]),
+        ("verification_routes", toJson ["compiled_checker"]),
+        ("outcomes", toJson ["verified", "inconclusive", "unsupported", "domain_obstruction"]),
+        ("backends", toJson ["rational_checked_global_optimization"])
       ])
     ]),
     ("expression_nodes", toJson [
