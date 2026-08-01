@@ -64,15 +64,20 @@ class BridgeContractTest(unittest.TestCase):
         result = self.call("get_info", {})["result"]
         self.assertEqual(result["protocol_name"], "leancert-line-json")
         self.assertEqual(result["framing"], "ndjson")
-        self.assertEqual(result["bridge_api_version"], "2.1.0")
-        self.assertEqual(result["protocol_version"], "2.1.0")
-        self.assertEqual(result["certificate_schemas"], ["bound-check/2"])
+        self.assertEqual(result["bridge_api_version"], "2.2.0")
+        self.assertEqual(result["protocol_version"], "2.2.0")
+        self.assertEqual(
+            result["certificate_schemas"],
+            ["bound-check/2", "adaptive-bound-check/1"],
+        )
         self.assertIn("check_bound", result["operations"])
         self.assertIn("var", result["expression_nodes"])
         self.assertEqual(result["capabilities"]["check_bound"]["schema_version"], "2.1")
         self.assertEqual(result["capabilities"]["check_bound"]["request_schema"], "check-bound-request/1")
         self.assertEqual(result["capabilities"]["check_bound"]["result_schema"], "bound-outcome/1")
-        self.assertNotIn("verify_adaptive", result["capabilities"])
+        adaptive = result["capabilities"]["verify_adaptive"]
+        self.assertEqual(adaptive["schema_version"], "2.2")
+        self.assertEqual(adaptive["result_schema"], "adaptive-bound-outcome/1")
         self.assertEqual(
             set(result["build"]),
             {"source_revision", "source_digest", "environment_digest", "profile"},
@@ -141,6 +146,45 @@ class BridgeContractTest(unittest.TestCase):
         self.assertIn("computed_hi", verified)
         expected = json.loads((FIXTURES / "verified-bound.json").read_text())
         self.assertEqual(verified, expected)
+
+    def test_adaptive_bound_uses_checked_optimizer_authority(self) -> None:
+        result = self.call(
+            "verify_adaptive",
+            {
+                "expr": {
+                    "kind": "mul",
+                    "e1": {"kind": "var", "idx": 0},
+                    "e2": {
+                        "kind": "sub",
+                        "e1": {"kind": "const", "val": rat(1)},
+                        "e2": {"kind": "var", "idx": 0},
+                    },
+                },
+                "box": [interval(0, 1)],
+                "bound": rat(3, 10),
+                "isUpperBound": True,
+                "maxIters": 1000,
+                "tolerance": rat(1, 1000),
+                "taylorDepth": 10,
+            },
+        )["result"]
+        self.assertTrue(result["verified"])
+        self.assertEqual(result["status"], "verified")
+        self.assertEqual(result["backend"], "rational_checked_global_optimization")
+        certificate = result["certificate"]
+        self.assertEqual(certificate["schema_version"], "adaptive-bound-check/1")
+        self.assertEqual(
+            certificate["checker"],
+            "LeanCert.Engine.Optimization.globalMaximizeRationalChecked",
+        )
+        self.assertEqual(
+            certificate["verifier"],
+            "LeanCert.Engine.Optimization.globalMaximizeRationalChecked_hi_correct",
+        )
+        self.assertEqual(
+            certificate["payload"]["schema_version"],
+            "checked-global-opt-bound/1",
+        )
 
         inconclusive = self.call(
             "check_bound",
