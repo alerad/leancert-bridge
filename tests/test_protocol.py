@@ -7,7 +7,7 @@ import unittest
 from pathlib import Path
 
 
-FIXTURES = Path(__file__).parent / "fixtures" / "bridge-contract-2.0"
+FIXTURES = Path(__file__).parent / "fixtures" / "bridge-contract-2.1"
 
 
 def rat(n: int, d: int = 1) -> dict[str, int]:
@@ -64,17 +64,24 @@ class BridgeContractTest(unittest.TestCase):
         result = self.call("get_info", {})["result"]
         self.assertEqual(result["protocol_name"], "leancert-line-json")
         self.assertEqual(result["framing"], "ndjson")
-        self.assertEqual(result["bridge_api_version"], "2.0.0")
-        self.assertEqual(result["protocol_version"], "2.0.0")
-        self.assertEqual(result["certificate_schemas"], ["bound-check/1"])
+        self.assertEqual(result["bridge_api_version"], "2.1.0")
+        self.assertEqual(result["protocol_version"], "2.1.0")
+        self.assertEqual(result["certificate_schemas"], ["bound-check/2"])
         self.assertIn("check_bound", result["operations"])
         self.assertIn("var", result["expression_nodes"])
+        self.assertEqual(result["capabilities"]["check_bound"]["schema_version"], "2.1")
         self.assertEqual(result["capabilities"]["check_bound"]["request_schema"], "check-bound-request/1")
         self.assertEqual(result["capabilities"]["check_bound"]["result_schema"], "bound-outcome/1")
         self.assertNotIn("verify_adaptive", result["capabilities"])
         self.assertEqual(
             set(result["build"]),
             {"source_revision", "source_digest", "environment_digest", "profile"},
+        )
+        self.assertEqual(result["dependencies"]["lean"]["toolchain"], "leanprover/lean4:v4.32.2")
+        self.assertEqual(result["dependencies"]["leancert"]["input_revision"], "v4.32.2.3")
+        self.assertEqual(
+            result["dependencies"]["leancert"]["resolved_revision"],
+            "6f0c9ae5bcd5e40463d9771f06b33ef145c242f6",
         )
 
     def test_zero_denominator_is_rejected(self) -> None:
@@ -125,7 +132,12 @@ class BridgeContractTest(unittest.TestCase):
         )["result"]
         self.assertTrue(verified["verified"])
         self.assertEqual(verified["status"], "verified")
-        self.assertEqual(verified["certificate"]["schema_version"], "bound-check/1")
+        self.assertEqual(verified["certificate"]["schema_version"], "bound-check/2")
+        payload = verified["certificate"]["payload"]
+        self.assertEqual(payload["schema_version"], "global-opt-bound-replay/1")
+        self.assertEqual(payload["direction"], "upper")
+        self.assertEqual(payload["config"]["max_iterations"], 1000)
+        self.assertEqual(payload["config"]["tolerance"], rat(1, 1000))
         self.assertIn("computed_hi", verified)
         expected = json.loads((FIXTURES / "verified-bound.json").read_text())
         self.assertEqual(verified, expected)
@@ -142,6 +154,69 @@ class BridgeContractTest(unittest.TestCase):
         self.assertFalse(inconclusive["verified"])
         self.assertEqual(inconclusive["status"], "inconclusive")
         self.assertIsNone(inconclusive["certificate"])
+
+    def test_replay_payload_uses_the_lowered_checked_expression(self) -> None:
+        verified = self.call(
+            "check_bound",
+            {
+                "expr": {
+                    "kind": "sub",
+                    "e1": {"kind": "var", "idx": 0},
+                    "e2": {"kind": "const", "val": rat(0)},
+                },
+                "box": [interval(0, 1)],
+                "bound": rat(1),
+                "isUpperBound": True,
+            },
+        )["result"]
+        payload = verified["certificate"]["payload"]
+        self.assertEqual(
+            payload["expression"],
+            {
+                "kind": "add",
+                "e1": {"kind": "var", "idx": 0},
+                "e2": {
+                    "kind": "neg",
+                    "e": {"kind": "const", "val": rat(0)},
+                },
+            },
+        )
+
+    def test_lean_432_evaluator_migrations_preserve_existing_operations(self) -> None:
+        expression = {"kind": "var", "idx": 0}
+        box = [interval(0, 1)]
+        rational = self.call("eval_interval", {"expr": expression, "box": box})["result"]
+        self.assertEqual((rational["lo"], rational["hi"]), (rat(0), rat(1)))
+
+        dyadic = self.call(
+            "eval_interval_dyadic",
+            {
+                "expr": expression,
+                "box": box,
+                "config": {"precision": -53, "taylorDepth": 10, "roundAfterOps": 0},
+            },
+        )["result"]
+        self.assertEqual((dyadic["lo"], dyadic["hi"]), (rat(0), rat(1)))
+
+        affine = self.call(
+            "eval_interval_affine", {"expr": expression, "box": box}
+        )["result"]
+        self.assertEqual((affine["lo"], affine["hi"]), (rat(0), rat(1)))
+
+        minimum = self.call(
+            "global_min", {"expr": expression, "box": box, "maxIters": 2}
+        )["result"]
+        maximum = self.call(
+            "global_max", {"expr": expression, "box": box, "maxIters": 2}
+        )["result"]
+        self.assertLessEqual(
+            minimum["lo"]["n"] * minimum["hi"]["d"],
+            minimum["hi"]["n"] * minimum["lo"]["d"],
+        )
+        self.assertLessEqual(
+            maximum["lo"]["n"] * maximum["hi"]["d"],
+            maximum["hi"]["n"] * maximum["lo"]["d"],
+        )
 
     def test_unknown_method_uses_structured_error(self) -> None:
         response = self.call("not_an_operation", {})
