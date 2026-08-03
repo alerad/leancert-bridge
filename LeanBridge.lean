@@ -65,10 +65,10 @@ open Lean
 /-! ## 1. Serialization Helpers -/
 
 /-- Bridge contract API version. Major bumps are breaking. -/
-def bridgeApiVersion : String := "2.4.0"
+def bridgeApiVersion : String := "2.5.0"
 
 /-- Bridge binary version (decoupled from API version). -/
-def bridgeVersion : String := "0.5.0"
+def bridgeVersion : String := "0.6.0"
 
 /-- Lean toolchain version used to build this bridge binary. -/
 def leanVersion : String := Lean.versionString
@@ -94,6 +94,10 @@ def krawczykReplayPayloadSchema : String := "checked-unique-system-root/1"
 def eventualCertificateSchema : String := "eventual-bound-check/1"
 def eventualReplayPayloadSchema : String := "checked-eventual-bound/1"
 
+/-- Retained fixed checker input for scalar root claims. -/
+def scalarRootCertificateSchema : String := "scalar-root-check/1"
+def scalarRootReplayPayloadSchema : String := "checked-scalar-root/1"
+
 /-- Stable request and outcome schemas for the checked bound operation. -/
 def boundRequestSchema : String := "check-bound-request/1"
 def boundOutcomeSchema : String := "bound-outcome/1"
@@ -103,6 +107,8 @@ def systemRootRequestSchema : String := "check-unique-system-root-request/1"
 def systemRootOutcomeSchema : String := "unique-system-root-outcome/1"
 def eventualRequestSchema : String := "check-eventual-bound-request/1"
 def eventualOutcomeSchema : String := "eventual-bound-outcome/1"
+def scalarRootRequestSchema : String := "check-scalar-root-request/1"
+def scalarRootOutcomeSchema : String := "scalar-root-outcome/1"
 
 /-- Raw rational for JSON IO. Uses Int numerator and Nat denominator. -/
 structure RawRat where
@@ -537,6 +543,26 @@ instance : FromJson FindUniqueRootRequest where
     let taylorDepth := (j.getObjValAs? Nat "taylorDepth").toOption.getD 10
     return { expr, interval, taylorDepth }
 
+/-- Fixed scalar-root claim. Search and subdivision remain separate from this
+    proof boundary; the supplied interval is checked exactly as furnished. -/
+structure CheckScalarRootRequest where
+  expr : LExpr
+  interval : RawInterval
+  claim : String
+  taylorDepth : Nat := 10
+  deriving Repr, Inhabited
+
+instance : FromJson CheckScalarRootRequest where
+  fromJson? j := do
+    let expr ← j.getObjValAs? LExpr "expr"
+    let interval ← j.getObjValAs? RawInterval "interval"
+    let claim ← j.getObjValAs? String "claim"
+    if claim != "exists" && claim != "unique" && claim != "excluded" then
+      throw "claim must be one of: exists, unique, excluded"
+    if !exprVarsInRange 1 expr then throw "root expressions may only reference variable 0"
+    let taylorDepth := (j.getObjValAs? Nat "taylorDepth").toOption.getD 10
+    return { expr, interval, claim, taylorDepth }
+
 /-- Optional exact candidate supplied by an untrusted external numerical solver. -/
 structure RawKrawczykCandidate where
   center : Array RawRat
@@ -943,6 +969,33 @@ def eventualCertificateJson (req : CheckEventualBoundRequest) (cutoff : Nat) : J
       ("bound", toJson (toRawRat req.bound.toRat)),
       ("exponent", toJson req.exponent),
       ("cutoff", toJson cutoff)
+    ])
+  ]
+
+def scalarRootAuthority (claim : String) : String × String :=
+  if claim == "exists" then
+    ("LeanCert.Validity.RootFinding.checkSignChange",
+      "LeanCert.Validity.RootFinding.verify_sign_change")
+  else if claim == "unique" then
+    ("LeanCert.Validity.RootFinding.checkNewtonContractsCore",
+      "LeanCert.Validity.RootFinding.verify_unique_root_computable")
+  else
+    ("LeanCert.Validity.RootFinding.checkNoRoot",
+      "LeanCert.Validity.RootFinding.verify_no_root")
+
+def scalarRootCertificateJson (req : CheckScalarRootRequest) : Json :=
+  let (checker, verifier) := scalarRootAuthority req.claim
+  Json.mkObj [
+    ("schema_version", toJson scalarRootCertificateSchema),
+    ("checker", toJson checker),
+    ("verifier", toJson verifier),
+    ("verification_route", toJson "compiled_checker"),
+    ("payload", Json.mkObj [
+      ("schema_version", toJson scalarRootReplayPayloadSchema),
+      ("expression", exprToJson req.expr),
+      ("interval", toJson (toRawInterval req.interval.toInterval)),
+      ("claim", toJson req.claim),
+      ("config", Json.mkObj [("taylor_depth", toJson req.taylorDepth)])
     ])
   ]
 
@@ -1390,6 +1443,33 @@ def handleFindUniqueRoot (req : FindUniqueRootRequest) : Json :=
         ])
       ]
 
+/-- Check a fixed scalar interval using one of LeanCert's published root
+    checkers. Successful responses retain precisely the checker input; no
+    bridge-side heuristic is part of the proof authority. -/
+def handleCheckScalarRoot (req : CheckScalarRootRequest) : Json :=
+  let I := req.interval.toInterval
+  let cfg : EvalConfig := { taylorDepth := req.taylorDepth }
+  let supported := if req.claim == "unique" || req.claim == "exists" then
+    req.expr.checkADSupported && req.expr.usesOnlyVar0
+  else
+    req.expr.checkSupportedCore
+  let checked := if !supported then false
+    else if req.claim == "exists" then
+      Validity.RootFinding.checkSignChange req.expr I cfg
+    else if req.claim == "unique" then
+      Validity.RootFinding.checkNewtonContractsCore req.expr I cfg
+    else
+      Validity.RootFinding.checkNoRoot req.expr I cfg
+  Json.mkObj [
+    ("verified", toJson checked),
+    ("status", toJson (if !supported then "unsupported"
+      else if checked then "verified" else "candidate_rejected")),
+    ("claim", toJson req.claim),
+    ("backend", toJson "rational_scalar_root"),
+    ("interval", toJson (toRawInterval I)),
+    ("certificate", if checked then scalarRootCertificateJson req else Json.null)
+  ]
+
 /-- Generate or accept an exact rational Krawczyk candidate, then independently
     run the fixed Boolean checker which is the sole authority for success. -/
 def handleCheckUniqueSystemRoot (req : CheckUniqueSystemRootRequest) : Json :=
@@ -1695,14 +1775,14 @@ def handleGetInfo : Json :=
     ]),
     ("certificate_schemas", toJson [
       boundCertificateSchema, adaptiveCertificateSchema, krawczykCertificateSchema,
-      eventualCertificateSchema]),
+      eventualCertificateSchema, scalarRootCertificateSchema]),
     ("verification_routes", toJson ["compiled_checker"]),
     ("operations", toJson [
       "ping", "get_info", "eval_interval", "eval_interval_dyadic",
       "eval_interval_affine", "global_min", "global_max", "global_min_dyadic",
       "global_max_dyadic", "global_min_affine", "global_max_affine", "check_bound",
       "integrate", "find_roots", "find_unique_root", "verify_adaptive",
-      "check_unique_system_root", "check_eventual_bound",
+      "check_unique_system_root", "check_eventual_bound", "check_scalar_root",
       "forward_interval", "deriv_interval"
     ]),
     ("capabilities", Json.mkObj [
@@ -1743,6 +1823,16 @@ def handleGetInfo : Json :=
         ("outcomes", toJson ["verified", "candidate_rejected", "inconclusive", "unsupported"]),
         ("backends", toJson ["rational_reciprocal_power"]),
         ("tail_family", toJson "nonnegative_rational_reciprocal_power_upper")
+      ]),
+      ("check_scalar_root", Json.mkObj [
+        ("schema_version", toJson "2.5"),
+        ("request_schema", toJson scalarRootRequestSchema),
+        ("result_schema", toJson scalarRootOutcomeSchema),
+        ("certificate_schemas", toJson [scalarRootCertificateSchema]),
+        ("verification_routes", toJson ["compiled_checker"]),
+        ("outcomes", toJson ["verified", "candidate_rejected", "unsupported"]),
+        ("backends", toJson ["rational_scalar_root"]),
+        ("claim_kinds", toJson ["exists", "unique", "excluded"])
       ])
     ]),
     ("expression_nodes", toJson [
@@ -1864,6 +1954,12 @@ def processRequest (line : String) : IO Unit := do
           | Except.ok req => Json.mkObj [("result", handleCheckEventualBound req)]
           | Except.error e =>
               protocolError "invalid_params" s!"Invalid check_eventual_bound params: {e}"
+
+        | "check_scalar_root" =>
+          match fromJson? (α := CheckScalarRootRequest) args with
+          | Except.ok req => Json.mkObj [("result", handleCheckScalarRoot req)]
+          | Except.error e =>
+              protocolError "invalid_params" s!"Invalid check_scalar_root params: {e}"
 
         | "forward_interval" =>
           match fromJson? (α := ForwardIntervalRequest) args with
