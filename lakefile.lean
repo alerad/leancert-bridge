@@ -82,6 +82,10 @@ lean_exe lean_bridge where
   root := `BridgeMain
   supportInterpreter := false
 
+/- Cross-platform artifact hook used by managed runtime environments. -/
+lean_exe lean_bridge_runtime_prepare where
+  root := `BridgeBuild.PrepareRuntime
+
 /- Integration-test executable demonstrating the downstream profiled-root
 pattern. Real downstream projects provide their own root importing their
 registered enclosure modules. -/

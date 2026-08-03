@@ -11,7 +11,7 @@ Runtime direction stays one-way:
 
 - Python SDK starts `lean_bridge`
 - Python sends requests over stdin/stdout
-- Bridge returns checked outcomes where advertised and exact build provenance
+- Bridge returns checked outcomes where advertised; the process manager records exact build provenance
 
 Only operations listed under the handshake's `capabilities` object are typed
 checked APIs. Other advertised operations are computational or discovery
