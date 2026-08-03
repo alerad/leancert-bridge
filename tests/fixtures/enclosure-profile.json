@@ -1,0 +1,8 @@
+{
+  "schema_version": "leancert-enclosure-profile/1",
+  "name": "bridge-generic-test",
+  "modules": ["BridgeBuild.TestEnclosureExtension"],
+  "allowed_functions": ["LeanCert.Bridge.TestEnclosureExtension.shifted"],
+  "leancert_revision": "06cf13980fde15b21fe2600cbb8b8d4e0e612f3c",
+  "environment_digest": "sha256:generic-bridge-test-fixture-v1"
+}

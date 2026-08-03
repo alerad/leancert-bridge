@@ -10,6 +10,11 @@ from pathlib import Path
 FIXTURES = Path(__file__).parent / "fixtures" / "bridge-contract-2.1"
 
 
+def bridge_executable(variable: str, default: str) -> str:
+    """Return an explicit path suitable for CreateProcess on every runner."""
+    return str(Path(os.environ.get(variable, default)).resolve())
+
+
 def rat(n: int, d: int = 1) -> dict[str, int]:
     return {"n": n, "d": d}
 
@@ -21,7 +26,7 @@ def interval(lo: int, hi: int) -> dict[str, dict[str, int]]:
 class BridgeContractTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
-        binary = os.environ.get("LEAN_BRIDGE", ".lake/build/bin/lean_bridge")
+        binary = bridge_executable("LEAN_BRIDGE", ".lake/build/bin/lean_bridge")
         cls.process = subprocess.Popen(
             [binary],
             stdin=subprocess.PIPE,
@@ -49,7 +54,17 @@ class BridgeContractTest(unittest.TestCase):
             json.dumps({"id": request_id, "method": method, "params": params}) + "\n"
         )
         self.process.stdin.flush()
-        response = json.loads(self.process.stdout.readline())
+        line = self.process.stdout.readline()
+        if line == "":
+            try:
+                return_code = self.process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                return_code = self.process.poll()
+            stderr = self.process.stderr.read() if self.process.stderr is not None else ""
+            self.fail(
+                f"lean_bridge exited before replying (exit code {return_code}):\n{stderr}"
+            )
+        response = json.loads(line)
         self.assertEqual(response.get("id"), request_id)
         return response
 
@@ -64,8 +79,8 @@ class BridgeContractTest(unittest.TestCase):
         result = self.call("get_info", {})["result"]
         self.assertEqual(result["protocol_name"], "leancert-line-json")
         self.assertEqual(result["framing"], "ndjson")
-        self.assertEqual(result["bridge_api_version"], "2.7.0")
-        self.assertEqual(result["protocol_version"], "2.7.0")
+        self.assertEqual(result["bridge_api_version"], "2.8.0")
+        self.assertEqual(result["protocol_version"], "2.8.0")
         self.assertEqual(
             result["certificate_schemas"],
             [
@@ -76,6 +91,7 @@ class BridgeContractTest(unittest.TestCase):
                 "eventual-bound-check/1",
                 "scalar-root-check/1",
                 "integral-check/1",
+                "registered-enclosure-check/1",
             ],
         )
         self.assertIn("check_bound", result["operations"])
@@ -124,15 +140,22 @@ class BridgeContractTest(unittest.TestCase):
         self.assertEqual(integral["result_schema"], "integral-outcome/1")
         self.assertEqual(integral["certificate_schemas"], ["integral-check/1"])
         self.assertEqual(integral["relations"], ["eq", "lower", "upper"])
+        registered = result["capabilities"]["check_registered_enclosure"]
+        self.assertEqual(registered["schema_version"], "2.8")
+        self.assertTrue(registered["profile_required"])
+        self.assertFalse(registered["profile_loaded"])
+        replay = result["capabilities"]["replay_registered_enclosure"]
+        self.assertFalse(replay["candidate_execution"])
+        self.assertIsNone(result["enclosure_profile"])
         self.assertEqual(
             set(result["build"]),
             {"source_revision", "source_digest", "environment_digest", "profile"},
         )
         self.assertEqual(result["dependencies"]["lean"]["toolchain"], "leanprover/lean4:v4.32.2")
-        self.assertEqual(result["dependencies"]["leancert"]["input_revision"], "v4.32.2.3")
+        self.assertEqual(result["dependencies"]["leancert"]["input_revision"], "06cf139")
         self.assertEqual(
             result["dependencies"]["leancert"]["resolved_revision"],
-            "6f0c9ae5bcd5e40463d9771f06b33ef145c242f6",
+            "06cf13980fde15b21fe2600cbb8b8d4e0e612f3c",
         )
 
     def test_zero_denominator_is_rejected(self) -> None:
@@ -789,6 +812,127 @@ class BridgeContractTest(unittest.TestCase):
         response = self.call("not_an_operation", {})
         self.assertEqual(response["error"]["code"], "unknown_method")
         self.assertIn("not_an_operation", response["error"]["message"])
+
+    def test_standard_binary_rejects_unlinked_profile_module(self) -> None:
+        binary = bridge_executable("LEAN_BRIDGE", ".lake/build/bin/lean_bridge")
+        profile = Path(__file__).parent / "fixtures" / "enclosure-profile.json"
+        completed = subprocess.run(
+            [binary, "--enclosure-profile", str(profile)],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn("not statically linked", completed.stdout + completed.stderr)
+
+
+class RegisteredEnclosureProfileTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        binary = bridge_executable(
+            "LEAN_BRIDGE_PROFILED", ".lake/build/bin/lean_bridge_profile_test"
+        )
+        profile = Path(__file__).parent / "fixtures" / "enclosure-profile.json"
+        cls.process = subprocess.Popen(
+            [binary, "--enclosure-profile", str(profile)],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            bufsize=1,
+        )
+        cls.request_id = 10000
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        cls.process.terminate()
+        cls.process.wait(timeout=10)
+        for stream in (cls.process.stdin, cls.process.stdout, cls.process.stderr):
+            if stream is not None:
+                try:
+                    stream.close()
+                except BrokenPipeError:
+                    pass
+
+    def call(self, method: str, params: dict) -> dict:
+        type(self).request_id += 1
+        request_id = type(self).request_id
+        assert self.process.stdin is not None
+        assert self.process.stdout is not None
+        self.process.stdin.write(
+            json.dumps({"id": request_id, "method": method, "params": params}) + "\n"
+        )
+        self.process.stdin.flush()
+        line = self.process.stdout.readline()
+        if line == "":
+            try:
+                return_code = self.process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                return_code = self.process.poll()
+            stderr = self.process.stderr.read() if self.process.stderr is not None else ""
+            self.fail(
+                f"profiled lean_bridge exited before replying (exit code {return_code}):\n{stderr}"
+            )
+        response = json.loads(line)
+        self.assertEqual(response.get("id"), request_id)
+        return response
+
+    @staticmethod
+    def claim() -> dict:
+        return {
+            "expression": {
+                "kind": "registered",
+                "function": "LeanCert.Bridge.TestEnclosureExtension.shifted",
+                "argument": {"kind": "var", "idx": 0},
+            },
+            "domain": interval(0, 1),
+            "relation": "le",
+            "bound": rat(2),
+        }
+
+    def test_profile_is_frozen_and_advertised(self) -> None:
+        info = self.call("get_info", {})["result"]
+        profile = info["enclosure_profile"]
+        self.assertEqual(profile["name"], "bridge-generic-test")
+        self.assertEqual(
+            profile["allowed_functions"],
+            ["LeanCert.Bridge.TestEnclosureExtension.shifted"],
+        )
+        self.assertTrue(
+            info["capabilities"]["check_registered_enclosure"]["profile_loaded"]
+        )
+
+    def test_discovery_and_fixed_replay(self) -> None:
+        claim = self.claim()
+        discovered = self.call("check_registered_enclosure", claim)["result"]
+        self.assertEqual(discovered["status"], "verified")
+        self.assertEqual(discovered["enclosure"], interval(1, 2))
+        certificate = discovered["certificate"]
+        self.assertEqual(certificate["schema"], "registered-enclosure-check/1")
+
+        replayed = self.call(
+            "replay_registered_enclosure",
+            {"claim": claim, "certificate": certificate},
+        )["result"]
+        self.assertEqual(replayed["status"], "verified")
+        self.assertTrue(replayed["replayed"])
+
+        corrupted = json.loads(json.dumps(certificate))
+        corrupted["tree"]["entries"][0]["output"] = interval(99, 99)
+        rejected = self.call(
+            "replay_registered_enclosure",
+            {"claim": claim, "certificate": corrupted},
+        )["result"]
+        self.assertIn(
+            rejected["status"], {"candidate_rejected", "verification_failure"}
+        )
+
+    def test_unlisted_declaration_is_not_resolved(self) -> None:
+        claim = self.claim()
+        claim["expression"]["function"] = "LeanCert.Bridge.TestEnclosureExtension.notAllowed"
+        response = self.call("check_registered_enclosure", claim)
+        self.assertEqual(response["error"]["code"], "enclosure_execution_error")
 
 
 if __name__ == "__main__":

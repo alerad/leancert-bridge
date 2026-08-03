@@ -3,21 +3,7 @@ Copyright (c) 2024 LeanCert Contributors. All rights reserved.
 Released under Apache 2.0 license as described in the file LICENSE.
 Authors: LeanCert Contributors
 -/
-import Lean.Data.Json
-import BridgeBuild.BuildInfo
-import LeanCert.Core.Expr
-import LeanCert.Engine.IntervalEval
-import LeanCert.Engine.IntervalEvalDyadic
-import LeanCert.Engine.IntervalEvalAffine
-import LeanCert.Engine.Algebra.QPolyIntegral
-import LeanCert.Engine.Optimization.Global
-import LeanCert.Engine.Optimization.Gradient
-import LeanCert.Engine.Integrate
-import LeanCert.Engine.RootFinding.KrawczykCandidate
-import LeanCert.Validity.Bounds
-import LeanCert.Validity.Eventual
-import LeanCert.Validity.Integration
-import LeanCert.ML.Distillation
+import BridgeBuild.RuntimeBase
 
 /-!
 # LeanBridge: typed line-delimited JSON bridge for Python integration
@@ -67,16 +53,16 @@ open Lean
 /-! ## 1. Serialization Helpers -/
 
 /-- Bridge contract API version. Major bumps are breaking. -/
-def bridgeApiVersion : String := "2.7.0"
+def bridgeApiVersion : String := "2.8.0"
 
 /-- Bridge binary version (decoupled from API version). -/
-def bridgeVersion : String := "0.8.0"
+def bridgeVersion : String := "0.9.0-dev"
 
 /-- Lean toolchain version used to build this bridge binary. -/
 def leanVersion : String := Lean.versionString
 
-/-- LeanCert release selected by `lakefile.toml`. -/
-def leanCertVersion : String := "4.32.2.3"
+/-- LeanCert release selected by `lakefile.lean`. -/
+def leanCertVersion : String := "06cf13980fde15b21fe2600cbb8b8d4e0e612f3c"
 
 /-- Certificate/result schema emitted by checked bound operations. -/
 def boundCertificateSchema : String := "bound-check/2"
@@ -103,6 +89,10 @@ def eventualReplayPayloadSchema : String := "checked-eventual-bound/1"
 /-- Retained fixed checker input for scalar root claims. -/
 def scalarRootCertificateSchema : String := "scalar-root-check/1"
 def scalarRootReplayPayloadSchema : String := "checked-scalar-root/1"
+
+/-- Fixed registered-enclosure evidence emitted by Contract 2.8. -/
+def registeredEnclosureCertificateSchema : String := "registered-enclosure-check/1"
+def registeredEnclosureReplayPayloadSchema : String := "checked-registered-enclosure/1"
 
 /-- Retained fixed checker input for exact and bounded definite integrals. -/
 def integralCertificateSchema : String := "integral-check/1"
@@ -175,6 +165,244 @@ def RawInterval.toInterval (r : RawInterval) : IntervalRat :=
 /-- Convert IntervalRat to RawInterval -/
 def toRawInterval (i : IntervalRat) : RawInterval :=
   { lo := toRawRat i.lo, hi := toRawRat i.hi }
+
+/-! ### Immutable registered-enclosure profiles -/
+
+/-- A startup profile explicitly identifies the downstream modules and
+registered functions that this process is allowed to expose. -/
+structure EnclosureProfile where
+  schemaVersion : String
+  name : String
+  modules : Array String
+  allowedFunctions : Array String
+  leanCertRevision : String
+  environmentDigest : String
+  deriving Repr, Inhabited
+
+instance : FromJson EnclosureProfile where
+  fromJson? j := do
+    let schemaVersion ← j.getObjValAs? String "schema_version"
+    unless schemaVersion == "leancert-enclosure-profile/1" do
+      throw s!"unsupported enclosure profile schema: {schemaVersion}"
+    let name ← j.getObjValAs? String "name"
+    let modules ← j.getObjValAs? (Array String) "modules"
+    let allowedFunctions ← j.getObjValAs? (Array String) "allowed_functions"
+    let leanCertRevision ← j.getObjValAs? String "leancert_revision"
+    let environmentDigest ← j.getObjValAs? String "environment_digest"
+    if name.isEmpty then throw "enclosure profile name must not be empty"
+    if modules.isEmpty then throw "enclosure profile must import at least one module"
+    if allowedFunctions.isEmpty then
+      throw "enclosure profile must explicitly allow at least one registered function"
+    if environmentDigest.isEmpty then throw "enclosure profile environment digest must not be empty"
+    return { schemaVersion, name, modules, allowedFunctions, leanCertRevision, environmentDigest }
+
+/-- Frozen environment and deterministic registry selected once at startup. -/
+structure EnclosureRuntime where
+  profilePath : String
+  profile : EnclosureProfile
+  environment : Lean.Environment
+  rules : Array LeanCert.Tactic.Extension.UnaryEnclosureRule
+
+def profileToJson (runtime : EnclosureRuntime) : Json :=
+  Json.mkObj [
+    ("schema_version", toJson runtime.profile.schemaVersion),
+    ("name", toJson runtime.profile.name),
+    ("path", toJson runtime.profilePath),
+    ("modules", toJson runtime.profile.modules),
+    ("allowed_functions", toJson runtime.profile.allowedFunctions),
+    ("leancert_revision", toJson runtime.profile.leanCertRevision),
+    ("environment_digest", toJson runtime.profile.environmentDigest),
+    ("registry", Json.arr <| runtime.rules.map fun rule => Json.mkObj [
+      ("function", toJson rule.functionName.toString),
+      ("candidate", toJson rule.candidateName.toString),
+      ("checker", toJson rule.checkerName.toString),
+      ("theorem", toJson rule.theoremName.toString),
+      ("priority", toJson rule.rulePriority)
+    ])
+  ]
+
+unsafe def loadEnclosureRuntime (path : String)
+    (staticProfileModules : Array Name) : IO EnclosureRuntime := do
+  let source ← IO.FS.readFile path
+  let json ← match Json.parse source with
+    | .ok json => pure json
+    | .error error => throw <| IO.userError s!"invalid enclosure profile JSON: {error}"
+  let profile ← match fromJson? (α := EnclosureProfile) json with
+    | .ok profile => pure profile
+    | .error error => throw <| IO.userError s!"invalid enclosure profile: {error}"
+  unless profile.leanCertRevision == LeanCert.Bridge.BuildInfo.leanCertResolvedRevision do
+    throw <| IO.userError
+      s!"enclosure profile LeanCert revision `{profile.leanCertRevision}` does not match bridge revision `{LeanCert.Bridge.BuildInfo.leanCertResolvedRevision}`"
+  let profileModules := profile.modules.map String.toName
+  for moduleName in profileModules do
+    unless staticProfileModules.contains moduleName do
+      throw <| IO.userError
+        s!"enclosure profile module `{moduleName}` is not statically linked into this Bridge executable (linked modules: {staticProfileModules})"
+  Lean.initSearchPath (← Lean.findSysroot)
+  Lean.enableInitializersExecution
+  let imports := #[{ module := `BridgeBuild.RuntimeBase : Lean.Import }] ++
+    profileModules.map fun moduleName => { module := moduleName : Lean.Import }
+  let environment ← Lean.importModules (loadExts := true) imports {} 0
+  let allRules := LeanCert.Tactic.Extension.getAllUnaryEnclosureRules environment
+  let allowed := profile.allowedFunctions.map String.toName
+  let rules := allRules.filter fun rule => allowed.contains rule.functionName
+  for functionName in allowed do
+    unless rules.any fun rule => rule.functionName == functionName do
+      throw <| IO.userError
+        s!"enclosure profile allows `{functionName}` but no imported rule registers it"
+  return { profilePath := path, profile, environment, rules }
+
+/-! ### Safe registered-expression request AST -/
+
+inductive RegisteredExpr where
+  | rational (value : RawRat)
+  | variable
+  | neg (value : RegisteredExpr)
+  | add (left right : RegisteredExpr)
+  | sub (left right : RegisteredExpr)
+  | mul (left right : RegisteredExpr)
+  | div (left right : RegisteredExpr)
+  | pow (base : RegisteredExpr) (exponent : Nat)
+  | builtin (name : String) (argument : RegisteredExpr)
+  | registered (functionName : String) (argument : RegisteredExpr)
+  deriving Repr, Inhabited
+
+partial def registeredExprFromJson (j : Json) : Except String RegisteredExpr := do
+  let kind ← j.getObjValAs? String "kind"
+  match kind with
+  | "const" => return .rational (← j.getObjValAs? RawRat "val")
+  | "var" =>
+      let idx ← j.getObjValAs? Nat "idx"
+      unless idx == 0 do throw "registered enclosure expressions are univariate; expected var 0"
+      return .variable
+  | "neg" => return .neg (← registeredExprFromJson (← j.getObjVal? "e"))
+  | "add" => return (.add
+      (← registeredExprFromJson (← j.getObjVal? "e1"))
+      (← registeredExprFromJson (← j.getObjVal? "e2")))
+  | "sub" => return (.sub
+      (← registeredExprFromJson (← j.getObjVal? "e1"))
+      (← registeredExprFromJson (← j.getObjVal? "e2")))
+  | "mul" => return (.mul
+      (← registeredExprFromJson (← j.getObjVal? "e1"))
+      (← registeredExprFromJson (← j.getObjVal? "e2")))
+  | "div" => return (.div
+      (← registeredExprFromJson (← j.getObjVal? "e1"))
+      (← registeredExprFromJson (← j.getObjVal? "e2")))
+  | "pow" => return (.pow
+      (← registeredExprFromJson (← j.getObjVal? "base"))
+      (← j.getObjValAs? Nat "exp"))
+  | "registered" => return (.registered
+      (← j.getObjValAs? String "function")
+      (← registeredExprFromJson (← j.getObjVal? "argument")))
+  | name =>
+      if #["sin", "cos", "exp", "log", "sqrt", "inv", "atan", "arsinh",
+          "atanh", "sinc", "erf", "abs", "sinh", "cosh", "tanh"].contains name then
+        return .builtin name (← registeredExprFromJson (← j.getObjVal? "e"))
+      throw s!"unknown registered enclosure expression kind: {name}"
+
+instance : FromJson RegisteredExpr where
+  fromJson? := registeredExprFromJson
+
+structure CheckRegisteredEnclosureRequest where
+  expression : RegisteredExpr
+  domain : RawInterval
+  relation : String
+  bound : RawRat
+  precision : Int := -53
+  taylorDepth : Nat := 10
+  maxDepth : Nat := 4
+  deriving Repr, Inhabited
+
+instance : FromJson CheckRegisteredEnclosureRequest where
+  fromJson? j := do
+    let expression ← j.getObjValAs? RegisteredExpr "expression"
+    let domain ← j.getObjValAs? RawInterval "domain"
+    let relation ← j.getObjValAs? String "relation"
+    unless #["le", "lt", "ge", "gt"].contains relation do
+      throw "registered enclosure relation must be one of: le, lt, ge, gt"
+    let bound ← j.getObjValAs? RawRat "bound"
+    let precision := (j.getObjValAs? Int "precision").toOption.getD (-53)
+    let taylorDepth := (j.getObjValAs? Nat "taylor_depth").toOption.getD 10
+    let maxDepth := (j.getObjValAs? Nat "max_depth").toOption.getD 4
+    return { expression, domain, relation, bound, precision, taylorDepth, maxDepth }
+
+private def enclosureRuleFromJson (j : Json) : Except String
+    LeanCert.Tactic.Extension.UnaryEnclosureRule := do
+  return {
+    functionName := (← j.getObjValAs? String "function").toName
+    candidateName := (← j.getObjValAs? String "candidate").toName
+    checkerName := (← j.getObjValAs? String "checker").toName
+    theoremName := (← j.getObjValAs? String "theorem").toName
+    rulePriority := ← j.getObjValAs? Nat "priority"
+  }
+
+private def enclosureEntryFromJson (j : Json) : Except String
+    LeanCert.Tactic.Extension.RegisteredEnclosureCertificateEntry := do
+  let rule ← enclosureRuleFromJson (← j.getObjVal? "rule")
+  let requestJson ← j.getObjVal? "request"
+  let input ← requestJson.getObjValAs? RawInterval "input"
+  let precision ← requestJson.getObjValAs? Int "precision"
+  let taylorDepth ← requestJson.getObjValAs? Nat "taylor_depth"
+  let output ← j.getObjValAs? RawInterval "output"
+  return {
+    rule
+    request := { input := input.toInterval, precision, taylorDepth }
+    output := output.toInterval
+  }
+
+private partial def enclosureTreeFromJson (j : Json) : Except String
+    LeanCert.Tactic.Extension.RegisteredEnclosureCertificateTree := do
+  let kind ← j.getObjValAs? String "kind"
+  let input := (← j.getObjValAs? RawInterval "input").toInterval
+  match kind with
+  | "leaf" =>
+      let output := (← j.getObjValAs? RawInterval "output").toInterval
+      let entriesJson ← j.getObjValAs? (Array Json) "entries"
+      let entries ← entriesJson.mapM enclosureEntryFromJson
+      let compositionSteps ← j.getObjValAs? Nat "composition_steps"
+      return .leaf input output entries compositionSteps
+  | "bisect" =>
+      let left ← enclosureTreeFromJson (← j.getObjVal? "left")
+      let right ← enclosureTreeFromJson (← j.getObjVal? "right")
+      return .bisect input left right
+  | other => throw s!"unknown registered enclosure certificate node: {other}"
+
+structure RetainedEnclosureCertificate where
+  profileName : String
+  leanCertRevision : String
+  environmentDigest : String
+  certificate : LeanCert.Tactic.Extension.RegisteredEnclosureCertificate
+
+private def retainedEnclosureCertificateFromJson (j : Json) : Except String
+    RetainedEnclosureCertificate := do
+  let schema ← j.getObjValAs? String "schema"
+  unless schema == registeredEnclosureCertificateSchema do
+    throw s!"unsupported registered enclosure certificate schema: {schema}"
+  let profile ← j.getObjVal? "profile"
+  let profileName ← profile.getObjValAs? String "name"
+  let leanCertRevision ← profile.getObjValAs? String "leancert_revision"
+  let environmentDigest ← profile.getObjValAs? String "environment_digest"
+  let precision ← j.getObjValAs? Int "precision"
+  let taylorDepth ← j.getObjValAs? Nat "taylor_depth"
+  let configuredMaxDepth ← j.getObjValAs? Nat "configured_max_depth"
+  let tree ← enclosureTreeFromJson (← j.getObjVal? "tree")
+  return {
+    profileName
+    leanCertRevision
+    environmentDigest
+    certificate := { precision, taylorDepth, configuredMaxDepth, tree }
+  }
+
+structure ReplayRegisteredEnclosureRequest where
+  claim : CheckRegisteredEnclosureRequest
+  retained : RetainedEnclosureCertificate
+
+instance : FromJson ReplayRegisteredEnclosureRequest where
+  fromJson? j := do
+    let claim ← FromJson.fromJson? (α := CheckRegisteredEnclosureRequest)
+      (← j.getObjVal? "claim")
+    let retained ← retainedEnclosureCertificateFromJson (← j.getObjVal? "certificate")
+    return { claim, retained }
 
 /-! ### Dyadic Serialization -/
 
@@ -2028,8 +2256,238 @@ def handleDerivInterval (req : DerivIntervalRequest) : Json :=
     ("num_vars", toJson gradients.length)
   ]
 
+private def realRatExpr (value : ℚ) : Lean.MetaM Lean.Expr :=
+  Lean.Meta.mkAppOptM ``Rat.cast #[Lean.mkConst ``Real, none, Lean.toExpr value]
+
+private partial def registeredExprToLean (runtime : EnclosureRuntime)
+    (variableExpr : Lean.Expr) : RegisteredExpr → Lean.MetaM Lean.Expr
+  | .rational value => realRatExpr value.toRat
+  | .variable => pure variableExpr
+  | .neg value => do
+      let value ← registeredExprToLean runtime variableExpr value
+      Lean.Meta.mkAppM ``Neg.neg #[value]
+  | .add left right => do
+      let left ← registeredExprToLean runtime variableExpr left
+      let right ← registeredExprToLean runtime variableExpr right
+      Lean.Meta.mkAppM ``HAdd.hAdd #[left, right]
+  | .sub left right => do
+      let left ← registeredExprToLean runtime variableExpr left
+      let right ← registeredExprToLean runtime variableExpr right
+      Lean.Meta.mkAppM ``HSub.hSub #[left, right]
+  | .mul left right => do
+      let left ← registeredExprToLean runtime variableExpr left
+      let right ← registeredExprToLean runtime variableExpr right
+      Lean.Meta.mkAppM ``HMul.hMul #[left, right]
+  | .div left right => do
+      let left ← registeredExprToLean runtime variableExpr left
+      let right ← registeredExprToLean runtime variableExpr right
+      Lean.Meta.mkAppM ``HDiv.hDiv #[left, right]
+  | .pow base exponent => do
+      let base ← registeredExprToLean runtime variableExpr base
+      Lean.Meta.mkAppM ``HPow.hPow #[base, Lean.toExpr exponent]
+  | .registered functionName argument => do
+      let functionName := functionName.toName
+      unless runtime.rules.any fun rule => rule.functionName == functionName do
+        throwError "registered function `{functionName}` is not allowed by the startup profile"
+      Lean.Meta.mkAppM functionName #[← registeredExprToLean runtime variableExpr argument]
+  | .builtin name argument => do
+      let argument ← registeredExprToLean runtime variableExpr argument
+      match name with
+      | "sin" => Lean.Meta.mkAppM ``Real.sin #[argument]
+      | "cos" => Lean.Meta.mkAppM ``Real.cos #[argument]
+      | "exp" => Lean.Meta.mkAppM ``Real.exp #[argument]
+      | "log" => Lean.Meta.mkAppM ``Real.log #[argument]
+      | "sqrt" => Lean.Meta.mkAppM ``Real.sqrt #[argument]
+      | "inv" => Lean.Meta.mkAppM ``Inv.inv #[argument]
+      | "atan" => Lean.Meta.mkAppM ``Real.arctan #[argument]
+      | "arsinh" => Lean.Meta.mkAppM ``Real.arsinh #[argument]
+      | "atanh" => Lean.Meta.mkAppM ``Real.atanh #[argument]
+      | "sinc" => Lean.Meta.mkAppM ``Real.sinc #[argument]
+      | "erf" => Lean.Meta.mkAppM ``Real.erf #[argument]
+      | "abs" => Lean.Meta.mkAppM ``abs #[argument]
+      | "sinh" => Lean.Meta.mkAppM ``Real.sinh #[argument]
+      | "cosh" => Lean.Meta.mkAppM ``Real.cosh #[argument]
+      | "tanh" => Lean.Meta.mkAppM ``Real.tanh #[argument]
+      | other => throwError "unsupported registered-expression builtin `{other}`"
+
+private def registeredProposition (runtime : EnclosureRuntime)
+    (request : CheckRegisteredEnclosureRequest) : Lean.MetaM Lean.Expr := do
+  Lean.Meta.withLocalDeclD `x (Lean.mkConst ``Real) fun x => do
+    let expression ← registeredExprToLean runtime x request.expression
+    let bound ← realRatExpr request.bound.toRat
+    let comparison ← match request.relation with
+      | "le" => Lean.Meta.mkAppM ``LE.le #[expression, bound]
+      | "lt" => Lean.Meta.mkAppM ``LT.lt #[expression, bound]
+      | "ge" => Lean.Meta.mkAppM ``LE.le #[bound, expression]
+      | "gt" => Lean.Meta.mkAppM ``LT.lt #[bound, expression]
+      | _ => throwError "invalid registered enclosure relation"
+    let loRat := request.domain.lo.toRat
+    let hiRat := request.domain.hi.toRat
+    let orderedType ← Lean.Meta.mkAppM ``LE.le #[Lean.toExpr loRat, Lean.toExpr hiRat]
+    let ordered ← Lean.Meta.mkDecideProof orderedType
+    let interval ← Lean.Meta.mkAppM ``IntervalRat.mk
+      #[Lean.toExpr loRat, Lean.toExpr hiRat, ordered]
+    let membership ← Lean.Meta.mkAppM ``Membership.mem #[interval, x]
+    let implication ← Lean.mkArrow membership comparison
+    Lean.Meta.mkForallFVars #[x] implication
+
+private def ruleToJson (rule : LeanCert.Tactic.Extension.UnaryEnclosureRule) : Json :=
+  Json.mkObj [
+    ("function", toJson rule.functionName.toString),
+    ("candidate", toJson rule.candidateName.toString),
+    ("checker", toJson rule.checkerName.toString),
+    ("theorem", toJson rule.theoremName.toString),
+    ("priority", toJson rule.rulePriority)
+  ]
+
+private def enclosureEntryToJson
+    (entry : LeanCert.Tactic.Extension.RegisteredEnclosureCertificateEntry) : Json :=
+  Json.mkObj [
+    ("rule", ruleToJson entry.rule),
+    ("request", Json.mkObj [
+      ("input", toJson (toRawInterval entry.request.input)),
+      ("precision", toJson entry.request.precision),
+      ("taylor_depth", toJson entry.request.taylorDepth)
+    ]),
+    ("output", toJson (toRawInterval entry.output))
+  ]
+
+private partial def enclosureTreeToJson :
+    LeanCert.Tactic.Extension.RegisteredEnclosureCertificateTree → Json
+  | .leaf input output entries compositionSteps => Json.mkObj [
+      ("kind", toJson "leaf"),
+      ("input", toJson (toRawInterval input)),
+      ("output", toJson (toRawInterval output)),
+      ("entries", Json.arr (entries.map enclosureEntryToJson)),
+      ("composition_steps", toJson compositionSteps)
+    ]
+  | .bisect input left right => Json.mkObj [
+      ("kind", toJson "bisect"),
+      ("input", toJson (toRawInterval input)),
+      ("left", enclosureTreeToJson left),
+      ("right", enclosureTreeToJson right)
+    ]
+
+private def enclosureCertificateToJson (runtime : EnclosureRuntime)
+    (certificate : LeanCert.Tactic.Extension.RegisteredEnclosureCertificate) : Json :=
+  Json.mkObj [
+    ("schema", toJson registeredEnclosureCertificateSchema),
+    ("replay_payload_schema", toJson registeredEnclosureReplayPayloadSchema),
+    ("profile", profileToJson runtime),
+    ("precision", toJson certificate.precision),
+    ("taylor_depth", toJson certificate.taylorDepth),
+    ("configured_max_depth", toJson certificate.configuredMaxDepth),
+    ("tree", enclosureTreeToJson certificate.tree)
+  ]
+
+private def registeredFailureToJson
+    (failure : LeanCert.Tactic.Extension.RegisteredEnclosureFailure) : Json :=
+  let (status, detail) := match failure with
+    | .notApplicable => ("unsupported", "claim is not a supported registered enclosure bound")
+    | .unsupported expression detail => ("unsupported", s!"{detail}: {expression}")
+    | .domainObstruction operation detail => ("domain_obstruction", s!"{operation}: {detail}")
+    | .inconclusive detail _ => ("inconclusive", detail)
+    | .rejected _ _ detail => ("candidate_rejected", detail)
+    | .exhausted maxDepth boxes deepest leaves _ detail =>
+        ("inconclusive", s!"subdivision exhausted at depth {maxDepth} after {boxes} boxes (deepest {deepest}, leaves {leaves}): {detail}")
+    | .verificationFailure detail => ("verification_failure", detail)
+  Json.mkObj [("status", toJson status), ("detail", toJson detail)]
+
+/-- Structured infrastructure error used by Bridge Contract 2.0. -/
+def protocolError (code message : String) : Json :=
+  Json.mkObj [("error", Json.mkObj [
+    ("code", toJson code),
+    ("message", toJson message)
+  ])]
+
+unsafe def handleCheckRegisteredEnclosure (runtime : EnclosureRuntime)
+    (request : CheckRegisteredEnclosureRequest) : IO Json := do
+  let action : Lean.MetaM (Except LeanCert.Tactic.Extension.RegisteredEnclosureFailure
+      (LeanCert.Tactic.Extension.RegisteredEnclosureOutcome × Lean.Expr)) := do
+    let proposition ← registeredProposition runtime request
+    LeanCert.Tactic.Extension.discoverRegisteredEnclosureBoundMeta proposition
+      request.precision request.taylorDepth request.maxDepth
+  let coreContext : Lean.Core.Context := {
+    fileName := "<leancert-bridge-enclosure>"
+    fileMap := Lean.FileMap.ofString ""
+  }
+  let coreState : Lean.Core.State := { env := runtime.environment }
+  let (result, _, _) ← action.toIO coreContext coreState
+  match result with
+  | .error failure => return registeredFailureToJson failure
+  | .ok (outcome, _) =>
+      return Json.mkObj [
+        ("status", toJson "verified"),
+        ("enclosure", toJson (toRawInterval outcome.enclosure)),
+        ("registered_checks", toJson outcome.observations.size),
+        ("composition_steps", toJson outcome.compositionSteps),
+        ("certificate", enclosureCertificateToJson runtime outcome.certificate)
+      ]
+
+unsafe def dispatchCheckRegisteredEnclosure (runtime : Option EnclosureRuntime)
+    (args : Json) : IO Json := do
+  let some selectedRuntime := runtime
+    | return protocolError "profile_required"
+        "check_registered_enclosure requires --enclosure-profile at bridge startup"
+  let request ← match fromJson? (α := CheckRegisteredEnclosureRequest) args with
+    | .ok request => pure request
+    | .error parseError =>
+        let detail := s!"Invalid check_registered_enclosure params: {parseError}"
+        return protocolError "invalid_params" detail
+  try
+    return Json.mkObj [
+      ("result", ← handleCheckRegisteredEnclosure selectedRuntime request)]
+  catch error =>
+    return protocolError "enclosure_execution_error" error.toString
+
+unsafe def handleReplayRegisteredEnclosure (runtime : EnclosureRuntime)
+    (request : ReplayRegisteredEnclosureRequest) : IO Json := do
+  unless request.retained.profileName == runtime.profile.name &&
+      request.retained.leanCertRevision == runtime.profile.leanCertRevision &&
+      request.retained.environmentDigest == runtime.profile.environmentDigest do
+    return Json.mkObj [
+      ("status", toJson "verification_failure"),
+      ("detail", toJson "certificate profile identity does not match the loaded environment")]
+  let action : Lean.MetaM (Except LeanCert.Tactic.Extension.RegisteredEnclosureFailure
+      (LeanCert.Tactic.Extension.RegisteredEnclosureOutcome × Lean.Expr)) := do
+    let proposition ← registeredProposition runtime request.claim
+    LeanCert.Tactic.Extension.replayRegisteredEnclosureBoundMeta proposition
+      request.retained.certificate
+  let coreContext : Lean.Core.Context := {
+    fileName := "<leancert-bridge-enclosure-replay>"
+    fileMap := Lean.FileMap.ofString ""
+  }
+  let coreState : Lean.Core.State := { env := runtime.environment }
+  let (result, _, _) ← action.toIO coreContext coreState
+  match result with
+  | .error failure => return registeredFailureToJson failure
+  | .ok (outcome, _) => return Json.mkObj [
+      ("status", toJson "verified"),
+      ("enclosure", toJson (toRawInterval outcome.enclosure)),
+      ("registered_checks", toJson outcome.observations.size),
+      ("composition_steps", toJson outcome.compositionSteps),
+      ("replayed", toJson true),
+      ("certificate", enclosureCertificateToJson runtime outcome.certificate)
+    ]
+
+unsafe def dispatchReplayRegisteredEnclosure (runtime : Option EnclosureRuntime)
+    (args : Json) : IO Json := do
+  let some selectedRuntime := runtime
+    | return protocolError "profile_required"
+        "replay_registered_enclosure requires --enclosure-profile at bridge startup"
+  let request ← match fromJson? (α := ReplayRegisteredEnclosureRequest) args with
+    | .ok request => pure request
+    | .error parseError =>
+        let detail := s!"Invalid replay_registered_enclosure params: {parseError}"
+        return protocolError "invalid_params" detail
+  try
+    return Json.mkObj [
+      ("result", ← handleReplayRegisteredEnclosure selectedRuntime request)]
+  catch error =>
+    return protocolError "enclosure_execution_error" error.toString
+
 /-- Handle bridge metadata request for client compatibility checks. -/
-def handleGetInfo : Json :=
+def handleGetInfo (runtime : Option EnclosureRuntime := none) : Json :=
   Json.mkObj [
     ("protocol_name", toJson "leancert-line-json"),
     ("framing", toJson "ndjson"),
@@ -2054,10 +2512,12 @@ def handleGetInfo : Json :=
         ("resolved_revision", toJson LeanCert.Bridge.BuildInfo.leanCertResolvedRevision)
       ])
     ]),
+    ("enclosure_profile", runtime.map profileToJson |>.getD Json.null),
     ("certificate_schemas", toJson [
       boundCertificateSchema, strictBoundCertificateSchema, adaptiveCertificateSchema,
       krawczykCertificateSchema,
-      eventualCertificateSchema, scalarRootCertificateSchema, integralCertificateSchema]),
+      eventualCertificateSchema, scalarRootCertificateSchema, integralCertificateSchema,
+      registeredEnclosureCertificateSchema]),
     ("verification_routes", toJson ["compiled_checker"]),
     ("operations", toJson [
       "ping", "get_info", "eval_interval", "eval_interval_dyadic",
@@ -2066,7 +2526,8 @@ def handleGetInfo : Json :=
       "check_strict_bound",
       "integrate", "find_roots", "find_unique_root", "verify_adaptive",
       "check_unique_system_root", "check_eventual_bound", "check_scalar_root",
-      "check_integral", "forward_interval", "deriv_interval"
+      "check_integral", "check_registered_enclosure", "replay_registered_enclosure",
+      "forward_interval", "deriv_interval"
     ]),
     ("capabilities", Json.mkObj [
       ("check_bound", Json.mkObj [
@@ -2137,6 +2598,29 @@ def handleGetInfo : Json :=
           "unsupported", "domain_obstruction"]),
         ("backends", toJson ["rational_exact_polynomial", "rational_checked_partitions"]),
         ("relations", toJson ["eq", "lower", "upper"])
+      ]),
+      ("check_registered_enclosure", Json.mkObj [
+        ("schema_version", toJson "2.8"),
+        ("request_schema", toJson "check-registered-enclosure-request/1"),
+        ("result_schema", toJson "registered-enclosure-outcome/1"),
+        ("certificate_schemas", toJson [registeredEnclosureCertificateSchema]),
+        ("replay_payload_schema", toJson registeredEnclosureReplayPayloadSchema),
+        ("verification_routes", toJson ["kernel_proof", "fixed_checker_replay"]),
+        ("outcomes", toJson ["verified", "candidate_rejected", "inconclusive",
+          "unsupported", "domain_obstruction"]),
+        ("relations", toJson ["le", "lt", "ge", "gt"]),
+        ("profile_required", toJson true),
+        ("profile_loaded", toJson runtime.isSome)
+      ]),
+      ("replay_registered_enclosure", Json.mkObj [
+        ("schema_version", toJson "2.8"),
+        ("request_schema", toJson "replay-registered-enclosure-request/1"),
+        ("result_schema", toJson "registered-enclosure-outcome/1"),
+        ("certificate_schemas", toJson [registeredEnclosureCertificateSchema]),
+        ("verification_routes", toJson ["fixed_checker_replay"]),
+        ("candidate_execution", toJson false),
+        ("profile_required", toJson true),
+        ("profile_loaded", toJson runtime.isSome)
       ])
     ]),
     ("expression_nodes", toJson [
@@ -2149,15 +2633,8 @@ def handleGetInfo : Json :=
 
 /-! ## 5. Main Event Loop -/
 
-/-- Structured infrastructure error used by Bridge Contract 2.0. -/
-def protocolError (code message : String) : Json :=
-  Json.mkObj [("error", Json.mkObj [
-    ("code", toJson code),
-    ("message", toJson message)
-  ])]
-
 /-- Process one request from the custom line-delimited JSON protocol. -/
-def processRequest (line : String) : IO Unit := do
+unsafe def processRequest (runtime : Option EnclosureRuntime) (line : String) : IO Unit := do
   let respond (j : Json) : IO Unit := do
     IO.println j.compress
     (← IO.getStdout).flush
@@ -2175,6 +2652,22 @@ def processRequest (line : String) : IO Unit := do
       let args := match j.getObjVal? "params" with
         | Except.ok a => a
         | Except.error _ => Json.mkObj []
+
+      if method == "check_registered_enclosure" then
+        let result ← dispatchCheckRegisteredEnclosure runtime args
+        let final := match reqId with
+          | some id => result.setObjVal! "id" id
+          | none => result
+        respond final
+        return
+
+      if method == "replay_registered_enclosure" then
+        let result ← dispatchReplayRegisteredEnclosure runtime args
+        let final := match reqId with
+          | some id => result.setObjVal! "id" id
+          | none => result
+        respond final
+        return
 
       let result := match method with
         | "eval_interval" =>
@@ -2288,7 +2781,7 @@ def processRequest (line : String) : IO Unit := do
           | Except.error e => protocolError "invalid_params" s!"Invalid deriv_interval params: {e}"
 
         | "get_info" =>
-          Json.mkObj [("result", handleGetInfo)]
+          Json.mkObj [("result", handleGetInfo runtime)]
 
         | "ping" =>
           Json.mkObj [("result", "pong")]
@@ -2303,10 +2796,17 @@ def processRequest (line : String) : IO Unit := do
 
       respond final
 
-end LeanCert.Bridge
+/-! ## Process entry point -/
 
-/-- Main entry point: read lines from stdin, process each as a request -/
-def main : IO Unit := do
+/-- Run the Bridge with the downstream modules statically imported by the
+executable's root. The immutable JSON profile may only select from this list. -/
+unsafe def run (args : List String) (staticProfileModules : Array Name) : IO Unit := do
+  let runtime ← match args with
+    | [] => pure none
+    | ["--enclosure-profile", path] =>
+        some <$> loadEnclosureRuntime path staticProfileModules
+    | _ => throw (IO.userError
+        "usage: lean_bridge [--enclosure-profile PROFILE.json]")
   let stdin ← IO.getStdin
   repeat do
     let line ← stdin.getLine
@@ -2314,4 +2814,6 @@ def main : IO Unit := do
     -- Trim whitespace
     let trimmed := line.trimAscii.toString
     if !trimmed.isEmpty then
-      LeanCert.Bridge.processRequest trimmed
+      processRequest runtime trimmed
+
+end LeanCert.Bridge

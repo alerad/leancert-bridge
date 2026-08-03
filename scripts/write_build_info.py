@@ -33,7 +33,7 @@ def main() -> None:
 
     source_digest = digest((ROOT / "LeanBridge.lean",))
     environment_digest = digest(
-        (ROOT / "lean-toolchain", ROOT / "lakefile.toml", ROOT / "lake-manifest.json")
+        (ROOT / "lean-toolchain", ROOT / "lakefile.lean", ROOT / "lake-manifest.json")
     )
     lean_toolchain = (ROOT / "lean-toolchain").read_text().strip()
     manifest = json.loads((ROOT / "lake-manifest.json").read_text())
