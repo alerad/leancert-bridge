@@ -1,4 +1,4 @@
-# Bridge Contract 2.8
+# Bridge Contract 3.0
 
 LeanCert Bridge uses one line-delimited JSON request and response per operation.
 It is not JSON-RPC 2.0. Every valid request has an `id`, `method`, and `params`;
@@ -9,10 +9,9 @@ one of `result` or `error`.
 
 `bridge_api_version` follows semantic versioning. Additive response fields and
 new operations increment the minor version. Removing fields or changing their
-meaning requires a major version. Contract 2.0 introduces structured errors,
-immutable build provenance, and explicit per-operation schema identities.
-Contract 2.1 adds replayable checked-bound payloads and resolved dependency
-identities. Contract 2.2 adds checked adaptive-bound outcomes. Contract 2.3
+meaning requires a major version. Contract 2.0 introduces structured errors
+and explicit per-operation schema identities. Contract 2.1 adds replayable
+checked-bound payloads. Contract 2.2 adds checked adaptive-bound outcomes. Contract 2.3
 adds checked unique nonlinear-system roots through rational Krawczyk
 certificates. Contract 2.4 adds checked reciprocal-power eventual bounds with
 supplied or automatically discovered cutoffs. These are additive minor
@@ -23,6 +22,9 @@ global bounds by composing a checked interior rational bound with an exact
 strict margin.
 Contract 2.8 adds immutable downstream enclosure profiles, structured
 registered-function expressions, and fixed checker replay.
+Contract 3.0 removes Bridge-authored build and dependency provenance from the
+handshake. Managed execution environments own those supply-chain identities;
+the Bridge continues to report only protocol and mathematical capabilities.
 
 ## Handshake
 
@@ -30,11 +32,15 @@ registered-function expressions, and fixed checker replay.
 
 - protocol name, version, and NDJSON framing;
 - bridge, Lean, and LeanCert versions;
-- source revision, source digest, environment digest, and build profile;
-- the exact Lean toolchain and LeanCert source, input revision, and resolved commit;
 - supported operations and expression nodes;
 - certificate schemas and verification routes;
 - per-operation request, result, outcome, backend, certificate, and route capabilities.
+
+Repository revisions, dependency locks, environment identity, and execution
+identity are supplied by the process manager (`lean-runtime` for the Python
+SDK), not asserted by this mathematical protocol. A loaded downstream
+enclosure profile still reports its own profile and environment digests because
+those values identify mathematical inputs to registered-rule selection.
 
 Clients must negotiate capabilities before other calls. An operation appearing
 in `operations` is callable; it is a typed checked operation only when it also
@@ -235,10 +241,11 @@ a fresh proof term was elaborated and kernel-reduced for each request.
 the loaded environment. `fixed_checker_replay` additionally means candidate
 search was disabled and only retained checker inputs were consumed.
 
-## Build provenance
+## Execution provenance
 
-Local builds report the explicit `development`/`unavailable` sentinel values.
-CI runs `scripts/write_build_info.py` before compilation, embedding the Git
-revision, a digest of bridge source, a digest of the Lean toolchain and resolved
-Lake environment, and the build profile. Released binaries must never contain
-development sentinel provenance.
+The Bridge reports mathematical capabilities and certificate schemas; it does
+not self-report source revisions, dependency locks, or build digests. Execution
+hosts such as `lean-runtime` own that supply-chain provenance because they
+resolve, hash, build, and execute the exact environment. Enclosure-profile
+revision and environment-digest fields remain part of the checked profile input
+and are therefore still reported when a profile is loaded.

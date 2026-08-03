@@ -71,7 +71,6 @@ jobs:
           # against a stale binary from an earlier commit.
           rm -f .lake/build/bin/lean_bridge .lake/build/bin/lean_bridge_profile_test
           lake update
-          python3 scripts/write_build_info.py --source-revision "${{ github.sha }}" --profile "${{ startsWith(github.ref, 'refs/tags/') && 'release' || 'ci' }}"
           lake build lean_bridge lean_bridge_profile_test
           test -x .lake/build/bin/lean_bridge
           test -x .lake/build/bin/lean_bridge_profile_test
@@ -84,8 +83,6 @@ jobs:
           # this step instead of letting tests run against stale cached exes.
           Remove-Item ".lake\build\bin\lean_bridge.exe", ".lake\build\bin\lean_bridge_profile_test.exe" -ErrorAction SilentlyContinue
           lake update
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          python scripts/write_build_info.py --source-revision "${{ github.sha }}" --profile "${{ startsWith(github.ref, 'refs/tags/') && 'release' || 'ci' }}"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           lake build lean_bridge lean_bridge_profile_test
           if ($LASTEXITCODE -ne 0) {
