@@ -3,21 +3,43 @@ import Lake
 open Lake DSL
 
 /-- Whether one serialized module part contains regular `[init]` entries. -/
-unsafe def modulePartHasInitializers (path : System.FilePath) : IO Bool := do
-  let (data, _) ← Lean.CompactedRegion.read (α := Lean.ModuleData) path #[]
-  return data.entries.any fun (name, entries) =>
+def moduleDataHasInitializers (data : Lean.ModuleData) : Bool :=
+  data.entries.any fun (name, entries) =>
     name == `Lean.regularInitAttr && !entries.isEmpty
+
+/-- Load consecutive module-data parts, scan them for `[init]` entries, and
+hand the backing regions to the caller. Every `ModuleData` reference dies when
+this function returns, so the caller may safely free the regions. -/
+unsafe def readPartsHaveInitializers (paths : Array System.FilePath) :
+    IO (Bool × Array Lean.CompactedRegion) := do
+  let parts ← Lean.readModuleDataParts paths
+  let found := parts.any fun (data, _) => moduleDataHasInitializers data
+  return (found, parts.map (·.2))
 
 /-- Detect initializer-bearing modules from Lean's generated artifacts rather
 than guessing from namespaces or source syntax. Meta initializers live in the
-`.olean` parts; runtime initializers may live in `.ir`. -/
+`.olean` parts; runtime initializers may live in `.ir`.
+
+Module-system `.olean`/`.olean.server`/`.olean.private` parts are saved with
+`saveModuleDataParts` and share compacted regions, so they must be loaded
+together, in order, via `readModuleDataParts`; reading a later part on its own
+dereferences pointers into the earlier parts and crashes Lake. The `.ir` part
+has its own base address and may be read individually. Regions are freed after
+each check (in reverse order, once no data references remain) so scanning the
+whole import closure stays within memory. -/
 unsafe def moduleHasInitializers (arts : ModuleOutputArtifacts) : IO Bool := do
-  if ← modulePartHasInitializers arts.olean.path then return true
-  if let some privateOLean := arts.oleanPrivate? then
-    if ← modulePartHasInitializers privateOLean.path then return true
-  if let some ir := arts.ir? then
-    if ← modulePartHasInitializers ir.path then return true
-  return false
+  let mut oleanParts := #[arts.olean.path]
+  if let some server := arts.oleanServer? then
+    oleanParts := oleanParts.push server.path
+    if let some priv := arts.oleanPrivate? then
+      oleanParts := oleanParts.push priv.path
+  let (found, oleanRegions) ← readPartsHaveInitializers oleanParts
+  oleanRegions.reverse.forM (·.free)
+  if found then return true
+  let some ir := arts.ir? | return false
+  let (irFound, irRegions) ← readPartsHaveInitializers #[ir.path]
+  irRegions.reverse.forM (·.free)
+  return irFound
 
 /-
 Windows executables have a hard limit of 65,535 exported symbols. An
