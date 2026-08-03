@@ -1,4 +1,4 @@
-# Bridge Contract 2.4
+# Bridge Contract 2.6
 
 LeanCert Bridge uses one line-delimited JSON request and response per operation.
 It is not JSON-RPC 2.0. Every valid request has an `id`, `method`, and `params`;
@@ -16,7 +16,9 @@ identities. Contract 2.2 adds checked adaptive-bound outcomes. Contract 2.3
 adds checked unique nonlinear-system roots through rational Krawczyk
 certificates. Contract 2.4 adds checked reciprocal-power eventual bounds with
 supplied or automatically discovered cutoffs. These are additive minor
-releases of Contract 2.
+releases of Contract 2. Contract 2.5 adds fixed scalar-root existence,
+uniqueness, and exclusion claims. Contract 2.6 adds exact polynomial integral
+equalities and checked one-sided integral bounds.
 
 ## Handshake
 
@@ -55,10 +57,11 @@ Checked mathematical non-success is a tagged result:
 - `domain_obstruction`: a partial operation could not be certified on the domain.
 - `candidate_rejected`: a well-formed untrusted candidate failed its checker.
 
-`check_bound`, `verify_adaptive`, `check_unique_system_root`, and
-`check_eventual_bound` advertise typed checked capabilities. Other operations
-remain available as computational or discovery endpoints, but clients must not
-infer theorem authority from their untagged result dictionaries.
+`check_bound`, `verify_adaptive`, `check_unique_system_root`,
+`check_eventual_bound`, `check_scalar_root`, and `check_integral` advertise
+typed checked capabilities. Other operations remain available as computational
+or discovery endpoints, but clients must not infer theorem authority from their
+untagged result dictionaries.
 
 `check_bound` retains `verified`, `computed_lo`, and `computed_hi` for migration
 and additionally returns `status`, `direction`, `enclosure`, `backend`, and a
@@ -118,6 +121,35 @@ telemetry records whether the cutoff was supplied or discovered and, for
 discovery, its budget, checks, bracket, refinement steps, and completion state.
 Rejected supplied cutoffs are `candidate_rejected`; budget exhaustion is
 `inconclusive`; tails outside the advertised language are `unsupported`.
+
+### Checked scalar roots
+
+Contract 2.5 advertises `check_scalar_root` with request schema
+`check-scalar-root-request/1`, result schema `scalar-root-outcome/1`, and
+certificate schema `scalar-root-check/1`. The request supplies one exact
+rational interval and selects existence, uniqueness, or exclusion. The bridge
+executes respectively `checkSignChange`, `checkNewtonContractsCore`, or
+`checkNoRoot`. No root search or subdivision is part of this boundary.
+
+### Checked definite integrals
+
+Contract 2.6 advertises `check_integral` with request schema
+`check-integral-request/1`, result schema `integral-outcome/1`, and certificate
+schema `integral-check/1`.
+
+Exact equality is limited to the rational-polynomial fragment and is authorized
+by `QPoly.checkExactIntegral`. Numerical enclosures are never used to establish
+an equality. Lower and upper inequalities use bounded exponential discovery of
+a uniform partition count, followed by the fixed
+`checkIntegralPartitionLowerBound` or `checkIntegralPartitionUpperBound`
+checker. Discovery telemetry is informational; the certificate retains only
+the lowered expression, ordered rational interval, relation, rational bound,
+and selected partition count.
+
+An incorrect polynomial value or rejected fixed candidate is
+`candidate_rejected`, partition exhaustion is `inconclusive`, an evaluation
+failure is `domain_obstruction`, and expressions outside the advertised
+fragment are `unsupported`.
 
 ## Input validity
 

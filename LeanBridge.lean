@@ -9,12 +9,14 @@ import LeanCert.Core.Expr
 import LeanCert.Engine.IntervalEval
 import LeanCert.Engine.IntervalEvalDyadic
 import LeanCert.Engine.IntervalEvalAffine
+import LeanCert.Engine.Algebra.QPolyIntegral
 import LeanCert.Engine.Optimization.Global
 import LeanCert.Engine.Optimization.Gradient
 import LeanCert.Engine.Integrate
 import LeanCert.Engine.RootFinding.KrawczykCandidate
 import LeanCert.Validity.Bounds
 import LeanCert.Validity.Eventual
+import LeanCert.Validity.Integration
 import LeanCert.ML.Distillation
 
 /-!
@@ -65,10 +67,10 @@ open Lean
 /-! ## 1. Serialization Helpers -/
 
 /-- Bridge contract API version. Major bumps are breaking. -/
-def bridgeApiVersion : String := "2.5.0"
+def bridgeApiVersion : String := "2.6.0"
 
 /-- Bridge binary version (decoupled from API version). -/
-def bridgeVersion : String := "0.6.0"
+def bridgeVersion : String := "0.7.0"
 
 /-- Lean toolchain version used to build this bridge binary. -/
 def leanVersion : String := Lean.versionString
@@ -98,6 +100,10 @@ def eventualReplayPayloadSchema : String := "checked-eventual-bound/1"
 def scalarRootCertificateSchema : String := "scalar-root-check/1"
 def scalarRootReplayPayloadSchema : String := "checked-scalar-root/1"
 
+/-- Retained fixed checker input for exact and bounded definite integrals. -/
+def integralCertificateSchema : String := "integral-check/1"
+def integralReplayPayloadSchema : String := "checked-integral/1"
+
 /-- Stable request and outcome schemas for the checked bound operation. -/
 def boundRequestSchema : String := "check-bound-request/1"
 def boundOutcomeSchema : String := "bound-outcome/1"
@@ -109,6 +115,8 @@ def eventualRequestSchema : String := "check-eventual-bound-request/1"
 def eventualOutcomeSchema : String := "eventual-bound-outcome/1"
 def scalarRootRequestSchema : String := "check-scalar-root-request/1"
 def scalarRootOutcomeSchema : String := "scalar-root-outcome/1"
+def integralRequestSchema : String := "check-integral-request/1"
+def integralOutcomeSchema : String := "integral-outcome/1"
 
 /-- Raw rational for JSON IO. Uses Int numerator and Nat denominator. -/
 structure RawRat where
@@ -509,6 +517,37 @@ instance : FromJson IntegrateRequest where
     if !exprVarsInRange 1 expr then throw "integration expressions may only reference variable 0"
     let taylorDepth := (j.getObjValAs? Nat "taylorDepth").toOption.getD 10
     return { expr, interval, partitions, taylorDepth }
+
+/-- Semantic definite-integral claim. Equality uses the exact rational-polynomial
+    checker. Lower and upper claims use untrusted partition discovery followed
+    by one retained fixed-candidate checker. -/
+structure CheckIntegralRequest where
+  expr : LExpr
+  interval : RawInterval
+  relation : String
+  bound : RawRat
+  startPartitions : Nat := 32
+  maxPartitions : Nat := 4096
+  deriving Repr, Inhabited
+
+instance : FromJson CheckIntegralRequest where
+  fromJson? j := do
+    let expr ← j.getObjValAs? LExpr "expr"
+    let interval ← j.getObjValAs? RawInterval "interval"
+    let relation ← j.getObjValAs? String "relation"
+    if relation != "eq" && relation != "lower" && relation != "upper" then
+      throw "relation must be one of: eq, lower, upper"
+    let bound ← j.getObjValAs? RawRat "bound"
+    let startPartitions := (j.getObjValAs? Nat "startPartitions").toOption.getD 32
+    let maxPartitions := (j.getObjValAs? Nat "maxPartitions").toOption.getD 4096
+    if startPartitions == 0 then throw "startPartitions must be positive"
+    if maxPartitions < startPartitions then
+      throw "maxPartitions must be at least startPartitions"
+    if interval.toInterval.hi < interval.toInterval.lo then
+      throw "integration interval endpoints must be ordered"
+    if !exprVarsInRange 1 expr then
+      throw "integration expressions may only reference variable 0"
+    return { expr, interval, relation, bound, startPartitions, maxPartitions }
 
 /-- Request for root finding -/
 structure FindRootsRequest where
@@ -999,6 +1038,64 @@ def scalarRootCertificateJson (req : CheckScalarRootRequest) : Json :=
     ])
   ]
 
+def integralAuthority (relation : String) : String × String :=
+  if relation == "eq" then
+    ("LeanCert.Engine.QPoly.checkExactIntegral",
+      "LeanCert.Engine.QPoly.integral_eq_of_check")
+  else if relation == "upper" then
+    ("LeanCert.Validity.Integration.checkIntegralPartitionUpperBound",
+      "LeanCert.Validity.Integration.integral_partition_upper_of_check")
+  else
+    ("LeanCert.Validity.Integration.checkIntegralPartitionLowerBound",
+      "LeanCert.Validity.Integration.integral_partition_lower_of_check")
+
+def integralCertificateJson (req : CheckIntegralRequest)
+    (partitions : Option Nat) : Json :=
+  let (checker, verifier) := integralAuthority req.relation
+  Json.mkObj [
+    ("schema_version", toJson integralCertificateSchema),
+    ("checker", toJson checker),
+    ("verifier", toJson verifier),
+    ("verification_route", toJson "compiled_checker"),
+    ("payload", Json.mkObj [
+      ("schema_version", toJson integralReplayPayloadSchema),
+      ("expression", exprToJson req.expr),
+      ("interval", toJson (toRawInterval req.interval.toInterval)),
+      ("relation", toJson req.relation),
+      ("bound", toJson (toRawRat req.bound.toRat)),
+      ("partitions", partitions.map toJson |>.getD Json.null)
+    ])
+  ]
+
+def integralSearchJson (source : String) (req : CheckIntegralRequest)
+    (chosen : Option Nat) (attempts : Nat) (failure : Json := Json.null) : Json :=
+  Json.mkObj [
+    ("source", toJson source),
+    ("start_partitions", if source == "automatic" then toJson req.startPartitions else Json.null),
+    ("max_partitions", if source == "automatic" then toJson req.maxPartitions else Json.null),
+    ("chosen_partitions", chosen.map toJson |>.getD Json.null),
+    ("attempts", toJson attempts),
+    ("failure", failure)
+  ]
+
+def integralFailureJson (kind detail : String) : Json :=
+  Json.mkObj [("kind", toJson kind), ("detail", toJson detail)]
+
+def integralOutcomeJson (req : CheckIntegralRequest) (status route backend : String)
+    (enclosure search certificate : Json) : Json :=
+  Json.mkObj [
+    ("verified", toJson (status == "verified")),
+    ("status", toJson status),
+    ("relation", toJson req.relation),
+    ("route", toJson route),
+    ("backend", toJson backend),
+    ("interval", toJson (toRawInterval req.interval.toInterval)),
+    ("bound", toJson (toRawRat req.bound.toRat)),
+    ("enclosure", enclosure),
+    ("search", search),
+    ("certificate", certificate)
+  ]
+
 def boundEnclosureJson (lo hi : ℚ) : Json :=
   Json.mkObj [
     ("lo", toJson (toRawRat lo)),
@@ -1300,6 +1397,84 @@ def handleIntegrate (req : IntegrateRequest) : Json :=
     ("lo", toJson (toRawRat result.lo)),
     ("hi", toJson (toRawRat result.hi))
   ]
+
+/-- Check an exact integral equality or discover and retain one fixed uniform
+    partition candidate for a one-sided integral bound. Search never appears
+    in the certificate and cannot authorize success. -/
+def handleCheckIntegral (req : CheckIntegralRequest) : Json :=
+  let I := req.interval.toInterval
+  let bound := req.bound.toRat
+  if req.relation == "eq" then
+    match QPoly.ofExpr req.expr with
+    | none =>
+        integralOutcomeJson req "unsupported" "exact_polynomial"
+          "rational_exact_polynomial" Json.null
+          (integralSearchJson "exact" req none 0
+            (integralFailureJson "unsupported_expression"
+              "exact integral equality requires a rational polynomial"))
+          Json.null
+    | some _ =>
+        let checked := QPoly.checkExactIntegral req.expr I.lo I.hi bound
+        let enclosure := if checked then
+          toJson (toRawInterval (IntervalRat.singleton bound))
+        else
+          Json.null
+        integralOutcomeJson req (if checked then "verified" else "candidate_rejected")
+          "exact_polynomial" "rational_exact_polynomial" enclosure
+          (integralSearchJson "exact" req none 0 (if checked then Json.null else
+            integralFailureJson "incorrect_exact_value"
+              "the exact polynomial checker rejected the claimed value"))
+          (if checked then integralCertificateJson req none else Json.null)
+  else if !req.expr.checkADSupported || !req.expr.usesOnlyVar0 then
+    integralOutcomeJson req "unsupported" "checked_partitions"
+      "rational_checked_partitions" Json.null
+      (integralSearchJson "automatic" req none 0
+        (integralFailureJson "unsupported_expression"
+          "checked integral bounds currently require the globally continuous AD fragment"))
+      Json.null
+  else
+    let search := if req.relation == "upper" then
+      Validity.Integration.searchPartitionUpperCandidate req.expr I
+        req.startPartitions req.maxPartitions bound
+    else
+      Validity.Integration.searchPartitionLowerCandidate req.expr I
+        req.startPartitions req.maxPartitions bound
+    match search with
+    | .success chosen enclosure attempts =>
+        let checked := if req.relation == "upper" then
+          Validity.Integration.checkIntegralPartitionUpperBound req.expr I chosen bound
+        else
+          Validity.Integration.checkIntegralPartitionLowerBound req.expr I chosen bound
+        integralOutcomeJson req (if checked then "verified" else "candidate_rejected")
+          "checked_partitions" "rational_checked_partitions"
+          (toJson (toRawInterval enclosure))
+          (integralSearchJson "automatic" req (some chosen) attempts
+            (if checked then Json.null else integralFailureJson "rejected_partition"
+              "the fixed partition checker rejected the discovered candidate"))
+          (if checked then integralCertificateJson req (some chosen) else Json.null)
+    | .exhausted lastPartitions lastEnclosure attempts =>
+        integralOutcomeJson req "inconclusive" "checked_partitions"
+          "rational_checked_partitions"
+          (lastEnclosure.map (fun enclosure => toJson (toRawInterval enclosure))
+            |>.getD Json.null)
+          (integralSearchJson "automatic" req lastPartitions attempts
+            (integralFailureJson "search_exhausted"
+              "partition discovery exhausted its configured maximum"))
+          Json.null
+    | .domainObstruction partitions attempts =>
+        integralOutcomeJson req "domain_obstruction" "checked_partitions"
+          "rational_checked_partitions" Json.null
+          (integralSearchJson "automatic" req (some partitions) attempts
+            (integralFailureJson "domain_obstruction"
+              "a partition cell could not be evaluated on the expression domain"))
+          Json.null
+    | .invalidStart =>
+        integralOutcomeJson req "unsupported" "checked_partitions"
+          "rational_checked_partitions" Json.null
+          (integralSearchJson "automatic" req none 0
+            (integralFailureJson "invalid_configuration"
+              "partition discovery requires a positive starting count"))
+          Json.null
 
 /-! ## Root Finding (Computable) -/
 
@@ -1775,7 +1950,7 @@ def handleGetInfo : Json :=
     ]),
     ("certificate_schemas", toJson [
       boundCertificateSchema, adaptiveCertificateSchema, krawczykCertificateSchema,
-      eventualCertificateSchema, scalarRootCertificateSchema]),
+      eventualCertificateSchema, scalarRootCertificateSchema, integralCertificateSchema]),
     ("verification_routes", toJson ["compiled_checker"]),
     ("operations", toJson [
       "ping", "get_info", "eval_interval", "eval_interval_dyadic",
@@ -1783,7 +1958,7 @@ def handleGetInfo : Json :=
       "global_max_dyadic", "global_min_affine", "global_max_affine", "check_bound",
       "integrate", "find_roots", "find_unique_root", "verify_adaptive",
       "check_unique_system_root", "check_eventual_bound", "check_scalar_root",
-      "forward_interval", "deriv_interval"
+      "check_integral", "forward_interval", "deriv_interval"
     ]),
     ("capabilities", Json.mkObj [
       ("check_bound", Json.mkObj [
@@ -1833,6 +2008,17 @@ def handleGetInfo : Json :=
         ("outcomes", toJson ["verified", "candidate_rejected", "unsupported"]),
         ("backends", toJson ["rational_scalar_root"]),
         ("claim_kinds", toJson ["exists", "unique", "excluded"])
+      ]),
+      ("check_integral", Json.mkObj [
+        ("schema_version", toJson "2.6"),
+        ("request_schema", toJson integralRequestSchema),
+        ("result_schema", toJson integralOutcomeSchema),
+        ("certificate_schemas", toJson [integralCertificateSchema]),
+        ("verification_routes", toJson ["compiled_checker"]),
+        ("outcomes", toJson ["verified", "candidate_rejected", "inconclusive",
+          "unsupported", "domain_obstruction"]),
+        ("backends", toJson ["rational_exact_polynomial", "rational_checked_partitions"]),
+        ("relations", toJson ["eq", "lower", "upper"])
       ])
     ]),
     ("expression_nodes", toJson [
@@ -1960,6 +2146,12 @@ def processRequest (line : String) : IO Unit := do
           | Except.ok req => Json.mkObj [("result", handleCheckScalarRoot req)]
           | Except.error e =>
               protocolError "invalid_params" s!"Invalid check_scalar_root params: {e}"
+
+        | "check_integral" =>
+          match fromJson? (α := CheckIntegralRequest) args with
+          | Except.ok req => Json.mkObj [("result", handleCheckIntegral req)]
+          | Except.error e =>
+              protocolError "invalid_params" s!"Invalid check_integral params: {e}"
 
         | "forward_interval" =>
           match fromJson? (α := ForwardIntervalRequest) args with
