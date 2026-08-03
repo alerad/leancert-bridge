@@ -6,7 +6,6 @@ Authors: LeanCert Contributors
 
 import Lean.Data.Json
 import Lean.Elab.Frontend
-import BridgeBuild.BuildInfo
 import LeanCert.Core.Expr
 import LeanCert.Engine.IntervalEval
 import LeanCert.Engine.IntervalEvalDyadic

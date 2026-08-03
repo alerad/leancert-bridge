@@ -79,8 +79,8 @@ class BridgeContractTest(unittest.TestCase):
         result = self.call("get_info", {})["result"]
         self.assertEqual(result["protocol_name"], "leancert-line-json")
         self.assertEqual(result["framing"], "ndjson")
-        self.assertEqual(result["bridge_api_version"], "2.8.0")
-        self.assertEqual(result["protocol_version"], "2.8.0")
+        self.assertEqual(result["bridge_api_version"], "3.0.0")
+        self.assertEqual(result["protocol_version"], "3.0.0")
         self.assertEqual(
             result["certificate_schemas"],
             [
@@ -147,16 +147,8 @@ class BridgeContractTest(unittest.TestCase):
         replay = result["capabilities"]["replay_registered_enclosure"]
         self.assertFalse(replay["candidate_execution"])
         self.assertIsNone(result["enclosure_profile"])
-        self.assertEqual(
-            set(result["build"]),
-            {"source_revision", "source_digest", "environment_digest", "profile"},
-        )
-        self.assertEqual(result["dependencies"]["lean"]["toolchain"], "leanprover/lean4:v4.32.2")
-        self.assertEqual(result["dependencies"]["leancert"]["input_revision"], "06cf139")
-        self.assertEqual(
-            result["dependencies"]["leancert"]["resolved_revision"],
-            "06cf13980fde15b21fe2600cbb8b8d4e0e612f3c",
-        )
+        self.assertNotIn("build", result)
+        self.assertNotIn("dependencies", result)
 
     def test_zero_denominator_is_rejected(self) -> None:
         response = self.call(

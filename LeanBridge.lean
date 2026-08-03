@@ -53,7 +53,7 @@ open Lean
 /-! ## 1. Serialization Helpers -/
 
 /-- Bridge contract API version. Major bumps are breaking. -/
-def bridgeApiVersion : String := "2.8.0"
+def bridgeApiVersion : String := "3.0.0"
 
 /-- Bridge binary version (decoupled from API version). -/
 def bridgeVersion : String := "0.9.0-dev"
@@ -230,9 +230,9 @@ unsafe def loadEnclosureRuntime (path : String)
   let profile ← match fromJson? (α := EnclosureProfile) json with
     | .ok profile => pure profile
     | .error error => throw <| IO.userError s!"invalid enclosure profile: {error}"
-  unless profile.leanCertRevision == LeanCert.Bridge.BuildInfo.leanCertResolvedRevision do
+  unless profile.leanCertRevision == leanCertVersion do
     throw <| IO.userError
-      s!"enclosure profile LeanCert revision `{profile.leanCertRevision}` does not match bridge revision `{LeanCert.Bridge.BuildInfo.leanCertResolvedRevision}`"
+      s!"enclosure profile LeanCert revision `{profile.leanCertRevision}` does not match bridge revision `{leanCertVersion}`"
   let profileModules := profile.modules.map String.toName
   for moduleName in profileModules do
     unless staticProfileModules.contains moduleName do
@@ -2496,22 +2496,6 @@ def handleGetInfo (runtime : Option EnclosureRuntime := none) : Json :=
     ("bridge_version", toJson bridgeVersion),
     ("lean_version", toJson leanVersion),
     ("leancert_version", toJson leanCertVersion),
-    ("build", Json.mkObj [
-      ("source_revision", toJson LeanCert.Bridge.BuildInfo.sourceRevision),
-      ("source_digest", toJson LeanCert.Bridge.BuildInfo.sourceDigest),
-      ("environment_digest", toJson LeanCert.Bridge.BuildInfo.environmentDigest),
-      ("profile", toJson LeanCert.Bridge.BuildInfo.profile)
-    ]),
-    ("dependencies", Json.mkObj [
-      ("lean", Json.mkObj [
-        ("toolchain", toJson LeanCert.Bridge.BuildInfo.leanToolchain)
-      ]),
-      ("leancert", Json.mkObj [
-        ("source", toJson LeanCert.Bridge.BuildInfo.leanCertSource),
-        ("input_revision", toJson LeanCert.Bridge.BuildInfo.leanCertInputRevision),
-        ("resolved_revision", toJson LeanCert.Bridge.BuildInfo.leanCertResolvedRevision)
-      ])
-    ]),
     ("enclosure_profile", runtime.map profileToJson |>.getD Json.null),
     ("certificate_schemas", toJson [
       boundCertificateSchema, strictBoundCertificateSchema, adaptiveCertificateSchema,
