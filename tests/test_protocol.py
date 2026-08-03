@@ -64,8 +64,8 @@ class BridgeContractTest(unittest.TestCase):
         result = self.call("get_info", {})["result"]
         self.assertEqual(result["protocol_name"], "leancert-line-json")
         self.assertEqual(result["framing"], "ndjson")
-        self.assertEqual(result["bridge_api_version"], "2.4.0")
-        self.assertEqual(result["protocol_version"], "2.4.0")
+        self.assertEqual(result["bridge_api_version"], "2.5.0")
+        self.assertEqual(result["protocol_version"], "2.5.0")
         self.assertEqual(
             result["certificate_schemas"],
             [
@@ -73,6 +73,7 @@ class BridgeContractTest(unittest.TestCase):
                 "adaptive-bound-check/1",
                 "krawczyk-check/1",
                 "eventual-bound-check/1",
+                "scalar-root-check/1",
             ],
         )
         self.assertIn("check_bound", result["operations"])
@@ -102,6 +103,13 @@ class BridgeContractTest(unittest.TestCase):
         self.assertEqual(
             eventual["certificate_schemas"], ["eventual-bound-check/1"]
         )
+        scalar_root = result["capabilities"]["check_scalar_root"]
+        self.assertEqual(scalar_root["schema_version"], "2.5")
+        self.assertEqual(
+            scalar_root["request_schema"], "check-scalar-root-request/1"
+        )
+        self.assertEqual(scalar_root["result_schema"], "scalar-root-outcome/1")
+        self.assertEqual(scalar_root["claim_kinds"], ["exists", "unique", "excluded"])
         self.assertEqual(
             set(result["build"]),
             {"source_revision", "source_digest", "environment_digest", "profile"},
@@ -366,6 +374,78 @@ class BridgeContractTest(unittest.TestCase):
                 "cutoff": 55,
             },
         )
+
+    def test_scalar_root_claims_emit_fixed_checked_certificates(self) -> None:
+        x = {"kind": "var", "idx": 0}
+        for claim, expression, checker, verifier in (
+            (
+                "exists",
+                x,
+                "LeanCert.Validity.RootFinding.checkSignChange",
+                "LeanCert.Validity.RootFinding.verify_sign_change",
+            ),
+            (
+                "unique",
+                x,
+                "LeanCert.Validity.RootFinding.checkNewtonContractsCore",
+                "LeanCert.Validity.RootFinding.verify_unique_root_computable",
+            ),
+            (
+                "excluded",
+                {
+                    "kind": "add",
+                    "e1": x,
+                    "e2": {"kind": "const", "val": rat(2)},
+                },
+                "LeanCert.Validity.RootFinding.checkNoRoot",
+                "LeanCert.Validity.RootFinding.verify_no_root",
+            ),
+        ):
+            with self.subTest(claim=claim):
+                result = self.call(
+                    "check_scalar_root",
+                    {"expr": expression, "interval": interval(-1, 1), "claim": claim},
+                )["result"]
+                self.assertTrue(result["verified"])
+                self.assertEqual(result["status"], "verified")
+                self.assertEqual(result["claim"], claim)
+                certificate = result["certificate"]
+                self.assertEqual(certificate["schema_version"], "scalar-root-check/1")
+                self.assertEqual(certificate["checker"], checker)
+                self.assertEqual(certificate["verifier"], verifier)
+                self.assertEqual(
+                    certificate["payload"],
+                    {
+                        "schema_version": "checked-scalar-root/1",
+                        "expression": expression,
+                        "interval": interval(-1, 1),
+                        "claim": claim,
+                        "config": {"taylor_depth": 10},
+                    },
+                )
+
+    def test_scalar_root_rejections_are_typed_and_certificate_free(self) -> None:
+        rejected = self.call(
+            "check_scalar_root",
+            {
+                "expr": {"kind": "var", "idx": 0},
+                "interval": interval(1, 2),
+                "claim": "exists",
+            },
+        )["result"]
+        self.assertEqual(rejected["status"], "candidate_rejected")
+        self.assertIsNone(rejected["certificate"])
+
+        unsupported = self.call(
+            "check_scalar_root",
+            {
+                "expr": {"kind": "sqrt", "e": {"kind": "var", "idx": 0}},
+                "interval": interval(1, 2),
+                "claim": "unique",
+            },
+        )["result"]
+        self.assertEqual(unsupported["status"], "unsupported")
+        self.assertIsNone(unsupported["certificate"])
 
     def test_eventual_bound_checks_supplied_cutoff_without_discovery(self) -> None:
         accepted = self.call(
