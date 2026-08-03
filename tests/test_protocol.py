@@ -64,8 +64,8 @@ class BridgeContractTest(unittest.TestCase):
         result = self.call("get_info", {})["result"]
         self.assertEqual(result["protocol_name"], "leancert-line-json")
         self.assertEqual(result["framing"], "ndjson")
-        self.assertEqual(result["bridge_api_version"], "2.5.0")
-        self.assertEqual(result["protocol_version"], "2.5.0")
+        self.assertEqual(result["bridge_api_version"], "2.6.0")
+        self.assertEqual(result["protocol_version"], "2.6.0")
         self.assertEqual(
             result["certificate_schemas"],
             [
@@ -74,6 +74,7 @@ class BridgeContractTest(unittest.TestCase):
                 "krawczyk-check/1",
                 "eventual-bound-check/1",
                 "scalar-root-check/1",
+                "integral-check/1",
             ],
         )
         self.assertIn("check_bound", result["operations"])
@@ -110,6 +111,12 @@ class BridgeContractTest(unittest.TestCase):
         )
         self.assertEqual(scalar_root["result_schema"], "scalar-root-outcome/1")
         self.assertEqual(scalar_root["claim_kinds"], ["exists", "unique", "excluded"])
+        integral = result["capabilities"]["check_integral"]
+        self.assertEqual(integral["schema_version"], "2.6")
+        self.assertEqual(integral["request_schema"], "check-integral-request/1")
+        self.assertEqual(integral["result_schema"], "integral-outcome/1")
+        self.assertEqual(integral["certificate_schemas"], ["integral-check/1"])
+        self.assertEqual(integral["relations"], ["eq", "lower", "upper"])
         self.assertEqual(
             set(result["build"]),
             {"source_revision", "source_digest", "environment_digest", "profile"},
@@ -446,6 +453,101 @@ class BridgeContractTest(unittest.TestCase):
         )["result"]
         self.assertEqual(unsupported["status"], "unsupported")
         self.assertIsNone(unsupported["certificate"])
+
+    def test_exact_integral_equality_retains_fixed_polynomial_check(self) -> None:
+        x = {"kind": "var", "idx": 0}
+        expression = {"kind": "mul", "e1": x, "e2": x}
+        result = self.call(
+            "check_integral",
+            {
+                "expr": expression,
+                "interval": interval(0, 1),
+                "relation": "eq",
+                "bound": rat(1, 3),
+            },
+        )["result"]
+        self.assertTrue(result["verified"])
+        self.assertEqual(result["route"], "exact_polynomial")
+        self.assertEqual(result["enclosure"], {"lo": rat(1, 3), "hi": rat(1, 3)})
+        certificate = result["certificate"]
+        self.assertEqual(certificate["schema_version"], "integral-check/1")
+        self.assertEqual(certificate["checker"], "LeanCert.Engine.QPoly.checkExactIntegral")
+        self.assertEqual(
+            certificate["verifier"], "LeanCert.Engine.QPoly.integral_eq_of_check"
+        )
+        self.assertEqual(
+            certificate["payload"],
+            {
+                "schema_version": "checked-integral/1",
+                "expression": expression,
+                "interval": interval(0, 1),
+                "relation": "eq",
+                "bound": rat(1, 3),
+                "partitions": None,
+            },
+        )
+
+    def test_integral_bound_retains_discovered_partition_candidate(self) -> None:
+        expression = {"kind": "exp", "e": {"kind": "var", "idx": 0}}
+        result = self.call(
+            "check_integral",
+            {
+                "expr": expression,
+                "interval": interval(0, 1),
+                "relation": "upper",
+                "bound": rat(2),
+                "startPartitions": 8,
+                "maxPartitions": 128,
+            },
+        )["result"]
+        self.assertTrue(result["verified"])
+        self.assertEqual(result["route"], "checked_partitions")
+        self.assertEqual(result["search"]["source"], "automatic")
+        self.assertEqual(result["search"]["chosen_partitions"], 8)
+        certificate = result["certificate"]
+        self.assertEqual(
+            certificate["checker"],
+            "LeanCert.Validity.Integration.checkIntegralPartitionUpperBound",
+        )
+        self.assertEqual(certificate["payload"]["partitions"], 8)
+        self.assertEqual(certificate["payload"]["relation"], "upper")
+
+    def test_integral_failures_are_typed_and_certificate_free(self) -> None:
+        x = {"kind": "var", "idx": 0}
+        incorrect = self.call(
+            "check_integral",
+            {
+                "expr": {"kind": "mul", "e1": x, "e2": x},
+                "interval": interval(0, 1),
+                "relation": "eq",
+                "bound": rat(1, 2),
+            },
+        )["result"]
+        self.assertEqual(incorrect["status"], "candidate_rejected")
+        self.assertIsNone(incorrect["certificate"])
+
+        unsupported = self.call(
+            "check_integral",
+            {
+                "expr": {"kind": "log", "e": x},
+                "interval": interval(1, 2),
+                "relation": "upper",
+                "bound": rat(1),
+            },
+        )["result"]
+        self.assertEqual(unsupported["status"], "unsupported")
+        self.assertIsNone(unsupported["certificate"])
+
+        invalid_interval = self.call(
+            "check_integral",
+            {
+                "expr": x,
+                "interval": interval(1, 0),
+                "relation": "eq",
+                "bound": rat(0),
+            },
+        )
+        self.assertEqual(invalid_interval["error"]["code"], "invalid_params")
 
     def test_eventual_bound_checks_supplied_cutoff_without_discovery(self) -> None:
         accepted = self.call(

@@ -20,7 +20,8 @@ endpoints. See [BRIDGE_CONTRACT.md](BRIDGE_CONTRACT.md).
 Checked capabilities currently cover fixed bounds, adaptive bounds, unique
 nonlinear-system roots certified by exact rational Krawczyk certificates, and
 reciprocal-power eventual bounds with supplied or automatically discovered
-cutoffs.
+cutoffs. They also cover fixed scalar-root claims and exact or partition-bounded
+definite integrals with replayable checker inputs.
 
 ## Local Build
 
