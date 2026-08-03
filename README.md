@@ -21,7 +21,8 @@ Checked capabilities currently cover fixed bounds, adaptive bounds, unique
 nonlinear-system roots certified by exact rational Krawczyk certificates, and
 reciprocal-power eventual bounds with supplied or automatically discovered
 cutoffs. They also cover fixed scalar-root claims and exact or partition-bounded
-definite integrals with replayable checker inputs.
+definite integrals with replayable checker inputs. Strict global bounds retain
+a checked interior rational bound plus the exact margin to their target.
 
 ## Local Build
 
@@ -44,11 +45,11 @@ Windows long paths.
 
 ## Releases
 
-Tag format: `vLEAN_MAJOR.LEAN_MINOR.LEAN_PATCH.BRIDGE_REVISION`
-
-The first three components exactly match `lean-toolchain`; the final component
-counts bridge releases for that toolchain, starting at `1`. For example, the
-first bridge release built with Lean `v4.32.2` is tagged `v4.32.2.1`.
+Bridge releases use independent semantic versions such as `v0.8.0`. The exact
+Lean toolchain and LeanCert Core revision are pinned by the build and reported
+by the runtime handshake; they are compatibility metadata, not components of
+the Bridge version. Older toolchain-aligned tags remain valid historical
+releases.
 
 On tag push, CI builds platform binaries and publishes GitHub release assets:
 
