@@ -1,4 +1,4 @@
-# Bridge Contract 2.6
+# Bridge Contract 2.7
 
 LeanCert Bridge uses one line-delimited JSON request and response per operation.
 It is not JSON-RPC 2.0. Every valid request has an `id`, `method`, and `params`;
@@ -18,7 +18,9 @@ certificates. Contract 2.4 adds checked reciprocal-power eventual bounds with
 supplied or automatically discovered cutoffs. These are additive minor
 releases of Contract 2. Contract 2.5 adds fixed scalar-root existence,
 uniqueness, and exclusion claims. Contract 2.6 adds exact polynomial integral
-equalities and checked one-sided integral bounds.
+equalities and checked one-sided integral bounds. Contract 2.7 adds strict
+global bounds by composing a checked interior rational bound with an exact
+strict margin.
 
 ## Handshake
 
@@ -57,7 +59,7 @@ Checked mathematical non-success is a tagged result:
 - `domain_obstruction`: a partial operation could not be certified on the domain.
 - `candidate_rejected`: a well-formed untrusted candidate failed its checker.
 
-`check_bound`, `verify_adaptive`, `check_unique_system_root`,
+`check_bound`, `check_strict_bound`, `verify_adaptive`, `check_unique_system_root`,
 `check_eventual_bound`, `check_scalar_root`, and `check_integral` advertise
 typed checked capabilities. Other operations remain available as computational
 or discovery endpoints, but clients must not infer theorem authority from their
@@ -83,6 +85,27 @@ Derived request nodes such as subtraction, division, and powers are lowered in
 the replay payload exactly as they were before checking. Clients may compute a
 canonical digest of this payload for identity, but must not synthesize or alter
 the payload and still describe it as bridge-issued evidence.
+
+### Replayable strict-bound certificates
+
+Contract 2.7 advertises `check_strict_bound` with request schema
+`check-strict-bound-request/1`, result schema `strict-bound-outcome/1`, and
+certificate schema `strict-bound-check/1`. The operation accepts `lt` for
+`expression < target` and `gt` for `target < expression`.
+
+The global optimizer proposes an exact rational `certified_bound` strictly
+inside the requested target. The bridge reruns `checkGlobalUpperBound` or
+`checkGlobalLowerBound` at that fixed interior value. A verified conclusion is
+authorized only by both facts:
+
+- the existing Golden Theorem proves the corresponding non-strict global bound;
+- exact rational comparison proves the retained interior bound has a strict
+  margin to the requested target.
+
+The certificate retains the lowered expression, exact rational box, relation,
+target, certified interior bound, and complete optimizer configuration. A box
+touching the target is `inconclusive`, never silently weakened to a non-strict
+claim. The original `check_bound` schemas and semantics remain unchanged.
 
 ### Checked unique system roots
 

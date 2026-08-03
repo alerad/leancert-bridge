@@ -67,10 +67,10 @@ open Lean
 /-! ## 1. Serialization Helpers -/
 
 /-- Bridge contract API version. Major bumps are breaking. -/
-def bridgeApiVersion : String := "2.6.0"
+def bridgeApiVersion : String := "2.7.0"
 
 /-- Bridge binary version (decoupled from API version). -/
-def bridgeVersion : String := "0.7.0"
+def bridgeVersion : String := "0.8.0"
 
 /-- Lean toolchain version used to build this bridge binary. -/
 def leanVersion : String := Lean.versionString
@@ -83,6 +83,10 @@ def boundCertificateSchema : String := "bound-check/2"
 
 /-- Exact checker-input schema embedded in replayable bound certificates. -/
 def boundReplayPayloadSchema : String := "global-opt-bound-replay/1"
+
+/-- Retained non-strict global bound plus exact margin for a strict conclusion. -/
+def strictBoundCertificateSchema : String := "strict-bound-check/1"
+def strictBoundReplayPayloadSchema : String := "checked-strict-bound/1"
 
 /-- Retained input/result schema for the checked adaptive optimizer. -/
 def adaptiveCertificateSchema : String := "adaptive-bound-check/1"
@@ -107,6 +111,8 @@ def integralReplayPayloadSchema : String := "checked-integral/1"
 /-- Stable request and outcome schemas for the checked bound operation. -/
 def boundRequestSchema : String := "check-bound-request/1"
 def boundOutcomeSchema : String := "bound-outcome/1"
+def strictBoundRequestSchema : String := "check-strict-bound-request/1"
+def strictBoundOutcomeSchema : String := "strict-bound-outcome/1"
 def adaptiveRequestSchema : String := "verify-adaptive-request/1"
 def adaptiveOutcomeSchema : String := "adaptive-bound-outcome/1"
 def systemRootRequestSchema : String := "check-unique-system-root-request/1"
@@ -500,6 +506,31 @@ instance : FromJson CheckBoundRequest where
     let isUpperBound ← j.getObjValAs? Bool "isUpperBound"
     let taylorDepth := (j.getObjValAs? Nat "taylorDepth").toOption.getD 10
     return { expr, box := boxArr, bound, isUpperBound, taylorDepth }
+
+/-- Request for a strict global bound. `lt` means `expr < bound`; `gt` means
+    `bound < expr`. The retained certificate proves an interior non-strict
+    bound and composes it with an exact rational margin. -/
+structure CheckStrictBoundRequest where
+  expr : LExpr
+  box : Array RawInterval
+  bound : RawRat
+  relation : String
+  taylorDepth : Nat := 10
+
+instance : FromJson CheckStrictBoundRequest where
+  fromJson? j := do
+    let expr ← j.getObjValAs? LExpr "expr"
+    let boxJson ← j.getObjVal? "box"
+    let boxArr ← match boxJson with
+      | Json.arr arr => arr.mapM (FromJson.fromJson? (α := RawInterval))
+      | _ => throw "box must be an array"
+    validateExprBox expr boxArr
+    let bound ← j.getObjValAs? RawRat "bound"
+    let relation ← j.getObjValAs? String "relation"
+    if relation != "lt" && relation != "gt" then
+      throw "strict bound relation must be one of: lt, gt"
+    let taylorDepth := (j.getObjValAs? Nat "taylorDepth").toOption.getD 10
+    return { expr, box := boxArr, bound, relation, taylorDepth }
 
 /-- Request for numerical integration -/
 structure IntegrateRequest where
@@ -933,6 +964,29 @@ def boundCertificateJson (req : CheckBoundRequest) (cfg : GlobalOptConfig)
     ("payload", boundReplayPayloadJson req cfg)
   ]
 
+def strictBoundCertificateJson (req : CheckStrictBoundRequest) (cfg : GlobalOptConfig)
+    (certifiedBound : ℚ) (checker verifier : String) : Json :=
+  Json.mkObj [
+    ("schema_version", toJson strictBoundCertificateSchema),
+    ("checker", toJson checker),
+    ("verifier", toJson verifier),
+    ("verification_route", toJson "compiled_checker"),
+    ("payload", Json.mkObj [
+      ("schema_version", toJson strictBoundReplayPayloadSchema),
+      ("expression", exprToJson req.expr),
+      ("box", toJson (req.box.map fun interval => toRawInterval interval.toInterval)),
+      ("relation", toJson req.relation),
+      ("target_bound", toJson (toRawRat req.bound.toRat)),
+      ("certified_bound", toJson (toRawRat certifiedBound)),
+      ("config", Json.mkObj [
+        ("max_iterations", toJson cfg.maxIterations),
+        ("tolerance", toJson (toRawRat cfg.tolerance)),
+        ("use_monotonicity", toJson cfg.useMonotonicity),
+        ("taylor_depth", toJson cfg.taylorDepth)
+      ])
+    ])
+  ]
+
 def adaptiveCertificateJson (req : VerifyAdaptiveRequest) (cfg : GlobalOptConfig)
     (result : GlobalResult) (checker verifier : String) : Json :=
   Json.mkObj [
@@ -1361,6 +1415,58 @@ def handleCheckBound (req : CheckBoundRequest) : Json :=
     ("backend", toJson "rational_global_optimization"),
     ("certificate", if verified then
       boundCertificateJson req cfg checker verifier
+      else Json.null)
+  ]
+
+/-- Check a strict global bound by retaining an interior non-strict bound.
+    The fixed global checker proves `expr ≤ certified` or `certified ≤ expr`;
+    exact rational comparison then supplies the strict margin to the target. -/
+def handleCheckStrictBound (req : CheckStrictBoundRequest) : Json :=
+  let box : Box := req.box.toList.map RawInterval.toInterval
+  let cfg : GlobalOptConfig := {
+    maxIterations := 1000
+    tolerance := 1 / 1000
+    useMonotonicity := true
+    taylorDepth := req.taylorDepth
+  }
+  let env : IntervalEnv := box.toEnv
+  let target := req.bound.toRat
+  let domainValid := checkDomainValid req.expr env { taylorDepth := req.taylorDepth }
+  let supported := isGloballyOptimizable req.expr
+  let isUpper := req.relation == "lt"
+  let result := if isUpper then
+    globalMaximizeCore req.expr box cfg
+  else
+    globalMinimizeCore req.expr box cfg
+  let certified := if isUpper then result.bound.hi else result.bound.lo
+  let margin := if isUpper then decide (certified < target) else decide (target < certified)
+  let fixedChecked := if isUpper then
+    LeanCert.Validity.GlobalOpt.checkGlobalUpperBound req.expr box certified cfg
+  else
+    LeanCert.Validity.GlobalOpt.checkGlobalLowerBound req.expr box certified cfg
+  let verified := supported && domainValid && margin && fixedChecked
+  let status := if !supported then "unsupported"
+    else if !domainValid then "domain_obstruction"
+    else if verified then "verified" else "inconclusive"
+  let checker := if isUpper then
+    "LeanCert.Validity.GlobalOpt.checkGlobalUpperBound"
+  else
+    "LeanCert.Validity.GlobalOpt.checkGlobalLowerBound"
+  let verifier := if isUpper then
+    "LeanCert.Validity.GlobalOpt.verify_global_upper_bound"
+  else
+    "LeanCert.Validity.GlobalOpt.verify_global_lower_bound"
+
+  Json.mkObj [
+    ("verified", toJson verified),
+    ("status", toJson status),
+    ("relation", toJson req.relation),
+    ("target_bound", toJson (toRawRat target)),
+    ("certified_bound", toJson (toRawRat certified)),
+    ("enclosure", boundEnclosureJson result.bound.lo result.bound.hi),
+    ("backend", toJson "rational_global_optimization"),
+    ("certificate", if verified then
+      strictBoundCertificateJson req cfg certified checker verifier
       else Json.null)
   ]
 
@@ -1949,13 +2055,15 @@ def handleGetInfo : Json :=
       ])
     ]),
     ("certificate_schemas", toJson [
-      boundCertificateSchema, adaptiveCertificateSchema, krawczykCertificateSchema,
+      boundCertificateSchema, strictBoundCertificateSchema, adaptiveCertificateSchema,
+      krawczykCertificateSchema,
       eventualCertificateSchema, scalarRootCertificateSchema, integralCertificateSchema]),
     ("verification_routes", toJson ["compiled_checker"]),
     ("operations", toJson [
       "ping", "get_info", "eval_interval", "eval_interval_dyadic",
       "eval_interval_affine", "global_min", "global_max", "global_min_dyadic",
       "global_max_dyadic", "global_min_affine", "global_max_affine", "check_bound",
+      "check_strict_bound",
       "integrate", "find_roots", "find_unique_root", "verify_adaptive",
       "check_unique_system_root", "check_eventual_bound", "check_scalar_root",
       "check_integral", "forward_interval", "deriv_interval"
@@ -1969,6 +2077,16 @@ def handleGetInfo : Json :=
         ("verification_routes", toJson ["compiled_checker"]),
         ("outcomes", toJson ["verified", "inconclusive", "unsupported", "domain_obstruction"]),
         ("backends", toJson ["rational_global_optimization"])
+      ]),
+      ("check_strict_bound", Json.mkObj [
+        ("schema_version", toJson "2.7"),
+        ("request_schema", toJson strictBoundRequestSchema),
+        ("result_schema", toJson strictBoundOutcomeSchema),
+        ("certificate_schemas", toJson [strictBoundCertificateSchema]),
+        ("verification_routes", toJson ["compiled_checker"]),
+        ("outcomes", toJson ["verified", "inconclusive", "unsupported", "domain_obstruction"]),
+        ("backends", toJson ["rational_global_optimization"]),
+        ("relations", toJson ["lt", "gt"])
       ]),
       ("verify_adaptive", Json.mkObj [
         ("schema_version", toJson "2.2"),
@@ -2108,6 +2226,12 @@ def processRequest (line : String) : IO Unit := do
           match fromJson? (α := CheckBoundRequest) args with
           | Except.ok req => Json.mkObj [("result", handleCheckBound req)]
           | Except.error e => protocolError "invalid_params" s!"Invalid check_bound params: {e}"
+
+        | "check_strict_bound" =>
+          match fromJson? (α := CheckStrictBoundRequest) args with
+          | Except.ok req => Json.mkObj [("result", handleCheckStrictBound req)]
+          | Except.error e =>
+              protocolError "invalid_params" s!"Invalid check_strict_bound params: {e}"
 
         | "integrate" =>
           match fromJson? (α := IntegrateRequest) args with

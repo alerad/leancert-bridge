@@ -64,12 +64,13 @@ class BridgeContractTest(unittest.TestCase):
         result = self.call("get_info", {})["result"]
         self.assertEqual(result["protocol_name"], "leancert-line-json")
         self.assertEqual(result["framing"], "ndjson")
-        self.assertEqual(result["bridge_api_version"], "2.6.0")
-        self.assertEqual(result["protocol_version"], "2.6.0")
+        self.assertEqual(result["bridge_api_version"], "2.7.0")
+        self.assertEqual(result["protocol_version"], "2.7.0")
         self.assertEqual(
             result["certificate_schemas"],
             [
                 "bound-check/2",
+                "strict-bound-check/1",
                 "adaptive-bound-check/1",
                 "krawczyk-check/1",
                 "eventual-bound-check/1",
@@ -82,6 +83,12 @@ class BridgeContractTest(unittest.TestCase):
         self.assertEqual(result["capabilities"]["check_bound"]["schema_version"], "2.1")
         self.assertEqual(result["capabilities"]["check_bound"]["request_schema"], "check-bound-request/1")
         self.assertEqual(result["capabilities"]["check_bound"]["result_schema"], "bound-outcome/1")
+        strict = result["capabilities"]["check_strict_bound"]
+        self.assertEqual(strict["schema_version"], "2.7")
+        self.assertEqual(strict["request_schema"], "check-strict-bound-request/1")
+        self.assertEqual(strict["result_schema"], "strict-bound-outcome/1")
+        self.assertEqual(strict["certificate_schemas"], ["strict-bound-check/1"])
+        self.assertEqual(strict["relations"], ["lt", "gt"])
         adaptive = result["capabilities"]["verify_adaptive"]
         self.assertEqual(adaptive["schema_version"], "2.2")
         self.assertEqual(adaptive["result_schema"], "adaptive-bound-outcome/1")
@@ -185,6 +192,108 @@ class BridgeContractTest(unittest.TestCase):
         self.assertIn("computed_hi", verified)
         expected = json.loads((FIXTURES / "verified-bound.json").read_text())
         self.assertEqual(verified, expected)
+
+    def test_strict_bounds_retain_checked_interior_margin(self) -> None:
+        x = {"kind": "var", "idx": 0}
+        verified = self.call(
+            "check_strict_bound",
+            {
+                "expr": x,
+                "box": [interval(0, 1)],
+                "relation": "lt",
+                "bound": rat(2),
+            },
+        )["result"]
+        self.assertTrue(verified["verified"])
+        self.assertEqual(verified["status"], "verified")
+        self.assertEqual(verified["certified_bound"], rat(1))
+        self.assertEqual(verified["target_bound"], rat(2))
+        certificate = verified["certificate"]
+        self.assertEqual(certificate["schema_version"], "strict-bound-check/1")
+        self.assertEqual(
+            certificate["checker"],
+            "LeanCert.Validity.GlobalOpt.checkGlobalUpperBound",
+        )
+        self.assertEqual(
+            certificate["verifier"],
+            "LeanCert.Validity.GlobalOpt.verify_global_upper_bound",
+        )
+        self.assertEqual(
+            certificate["payload"],
+            {
+                "schema_version": "checked-strict-bound/1",
+                "expression": x,
+                "box": [interval(0, 1)],
+                "relation": "lt",
+                "target_bound": rat(2),
+                "certified_bound": rat(1),
+                "config": {
+                    "max_iterations": 1000,
+                    "tolerance": rat(1, 1000),
+                    "use_monotonicity": True,
+                    "taylor_depth": 10,
+                },
+            },
+        )
+
+        lower = self.call(
+            "check_strict_bound",
+            {
+                "expr": x,
+                "box": [interval(0, 1)],
+                "relation": "gt",
+                "bound": rat(-1),
+            },
+        )["result"]
+        self.assertTrue(lower["verified"])
+        self.assertEqual(lower["certified_bound"], rat(0))
+        self.assertEqual(
+            lower["certificate"]["checker"],
+            "LeanCert.Validity.GlobalOpt.checkGlobalLowerBound",
+        )
+
+    def test_strict_bound_rejects_boundary_touching_and_bad_relations(self) -> None:
+        x = {"kind": "var", "idx": 0}
+        touching = self.call(
+            "check_strict_bound",
+            {
+                "expr": x,
+                "box": [interval(0, 1)],
+                "relation": "lt",
+                "bound": rat(1),
+            },
+        )["result"]
+        self.assertEqual(touching["status"], "inconclusive")
+        self.assertIsNone(touching["certificate"])
+
+        invalid = self.call(
+            "check_strict_bound",
+            {
+                "expr": x,
+                "box": [interval(0, 1)],
+                "relation": "le",
+                "bound": rat(2),
+            },
+        )
+        self.assertIn("relation", self.error_message(invalid))
+
+    def test_strict_bound_supports_multivariate_boxes(self) -> None:
+        expression = {
+            "kind": "add",
+            "e1": {"kind": "var", "idx": 0},
+            "e2": {"kind": "var", "idx": 1},
+        }
+        result = self.call(
+            "check_strict_bound",
+            {
+                "expr": expression,
+                "box": [interval(0, 1), interval(0, 1)],
+                "relation": "lt",
+                "bound": rat(3),
+            },
+        )["result"]
+        self.assertEqual(result["status"], "verified")
+        self.assertEqual(result["certified_bound"], rat(2))
 
     def test_adaptive_bound_uses_checked_optimizer_authority(self) -> None:
         result = self.call(

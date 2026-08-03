@@ -11,9 +11,12 @@
 
 ## 2. Create release tag
 
-Push tag like:
+Push an independent Bridge SemVer tag such as:
 
-- `bridge-v0.2.0`
+- `v0.8.0`
+
+Do not encode the Lean or LeanCert Core version in the Bridge tag. Confirm the
+exact pinned toolchain and resolved Core revision in the release handshake.
 
 CI builds binaries for Linux, macOS (x86_64/arm64), and Windows, then publishes release assets.
 
