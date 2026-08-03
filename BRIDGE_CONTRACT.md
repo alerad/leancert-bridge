@@ -1,4 +1,4 @@
-# Bridge Contract 2.7
+# Bridge Contract 2.8
 
 LeanCert Bridge uses one line-delimited JSON request and response per operation.
 It is not JSON-RPC 2.0. Every valid request has an `id`, `method`, and `params`;
@@ -21,6 +21,8 @@ uniqueness, and exclusion claims. Contract 2.6 adds exact polynomial integral
 equalities and checked one-sided integral bounds. Contract 2.7 adds strict
 global bounds by composing a checked interior rational bound with an exact
 strict margin.
+Contract 2.8 adds immutable downstream enclosure profiles, structured
+registered-function expressions, and fixed checker replay.
 
 ## Handshake
 
@@ -174,6 +176,49 @@ An incorrect polynomial value or rejected fixed candidate is
 failure is `domain_obstruction`, and expressions outside the advertised
 fragment are `unsupported`.
 
+### Registered downstream enclosures
+
+Contract 2.8 advertises `check_registered_enclosure` and
+`replay_registered_enclosure`. These operations are unavailable unless the
+profile-specific executable starts with an immutable profile:
+
+```bash
+lake env my_profiled_bridge --enclosure-profile profile.json
+```
+
+The `leancert-enclosure-profile/1` document names the imported modules, exact
+LeanCert revision, downstream environment digest, and explicit allowlist of
+unary registered functions. Every named module must be statically imported by
+the executable's entry point and declared to `LeanCert.Bridge.run`; the generic
+released executable supplies no downstream modules and rejects such a profile.
+The Bridge reconstructs this frozen environment once before reading stdin.
+`get_info` reports the profile and deterministic registered rule metadata. A
+request cannot load modules, mutate the registry, submit raw Lean syntax, or
+resolve a declaration outside the allowlist.
+
+`check_registered_enclosure` accepts a structured univariate expression AST.
+The `registered` node contains an allowlisted function identifier and a
+structured argument; ordinary exact rational arithmetic and supported core
+unary operations may surround or occur inside registered calls. The Bridge
+constructs a closed Lean proposition over an exact `IntervalRat` and invokes
+LeanCert's proof-producing registered-enclosure executor.
+
+Candidate generators remain untrusted discovery code. A verified
+`registered-enclosure-check/1` certificate retains:
+
+- the immutable profile identity and exact registry metadata;
+- precision, Taylor depth, and configured subdivision depth;
+- the complete subdivision tree and leaf domains/results;
+- every fixed rule request and output in consumption order;
+- composition-step counts.
+
+`replay_registered_enclosure` never invokes a candidate generator. It checks
+the certificate's profile identity, resolves each retained rule in the frozen
+environment, reruns its Boolean checker on the fixed output, applies the
+registered soundness theorem, and reconstructs the complete kernel proof.
+Mutated domains, outputs, rule identities, unused entries, or incomplete trees
+are rejected.
+
 ## Input validity
 
 The bridge rejects zero rational denominators, inverted intervals, and
@@ -185,6 +230,10 @@ malformed mathematical input by substituting zero or `[0, 0]`.
 `compiled_checker` means the released native bridge evaluated the named
 LeanCert Boolean checker and reports its Golden Theorem. It does not claim that
 a fresh proof term was elaborated and kernel-reduced for each request.
+
+`kernel_proof` means the Bridge constructed and discharged a fresh Lean goal in
+the loaded environment. `fixed_checker_replay` additionally means candidate
+search was disabled and only retained checker inputs were consumed.
 
 ## Build provenance
 
