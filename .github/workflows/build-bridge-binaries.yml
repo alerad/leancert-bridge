@@ -176,7 +176,7 @@ jobs:
         env:
           RUNTIME_REVISION: ${{ inputs.runtime-revision || github.sha }}
         run: |
-          python -m pip install 'lean-runtime>=1.0.0,<2.0.0'
+          python -m pip install 'lean-runtime>=1.0.1,<2.0.0'
           mkdir -p runtime-cache
           python scripts/resolve_runtime_lock.py \
             --revision "$RUNTIME_REVISION" \
@@ -227,7 +227,7 @@ jobs:
           LEAN_RUNTIME_REGISTRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
           RUNTIME_TAG: ${{ inputs.runtime-tag || github.ref_name }}
         run: |
-          python -m pip install 'lean-runtime>=1.0.0,<2.0.0'
+          python -m pip install 'lean-runtime>=1.0.1,<2.0.0'
           LOCK_ID="$(python - <<'PY'
           import json
           from pathlib import Path
