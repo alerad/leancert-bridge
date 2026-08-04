@@ -51,6 +51,7 @@ jobs:
 
     permissions:
       contents: read
+      id-token: write
       packages: write
 
     steps:
@@ -182,6 +183,10 @@ jobs:
             --revision "$RUNTIME_REVISION" \
             --output "runtime-cache/environment.lock-${{ matrix.platform }}-${{ matrix.arch }}.json"
 
+      - name: Install Cosign for runtime attestation
+        if: github.event_name != 'pull_request'
+        uses: sigstore/cosign-installer@v4.1.2
+
       - name: Build and publish platform runtime
         if: github.event_name != 'pull_request'
         shell: bash
@@ -193,6 +198,7 @@ jobs:
             "runtime-cache/environment.lock-${{ matrix.platform }}-${{ matrix.arch }}.json" \
             --push-to "$LEANCERT_RUNTIME_REPOSITORY" \
             --platform-only \
+            --attest \
             > "runtime-cache/platform-${{ matrix.platform }}-${{ matrix.arch }}.json"
 
       - name: Upload runtime publication result
