@@ -31,12 +31,12 @@ jobs:
             arch: x86_64
             binary_name: lean_bridge
             asset_name: lean_bridge-linux-x86_64
-          - os: macos-15
+          - os: macos-15-intel
             platform: macos
             arch: x86_64
             binary_name: lean_bridge
             asset_name: lean_bridge-macos-x86_64
-          - os: macos-latest
+          - os: macos-15
             platform: macos
             arch: arm64
             binary_name: lean_bridge
