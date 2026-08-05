@@ -113,3 +113,17 @@ On tag push, CI builds platform binaries and publishes GitHub release assets:
 - `lean_bridge-macos-x86_64`
 - `lean_bridge-macos-arm64`
 - `lean_bridge-windows-x86_64.exe`
+
+The same matrix publishes the exact managed Bridge environment to the
+`ghcr.io/alerad/leancert-runtime` environment library. Each computer uploads
+its immutable environment copy and computer record; a final job completes the
+publication only after all computers prepare the same exact environment.
+`leancert-python` can then download and verify this environment through Lean
+Runtime 2 instead of rebuilding LeanCert and Mathlib locally. When no suitable
+download is available, Lean Runtime can still fall back to a source build.
+
+Manual workflow dispatch can publish a specific 40-character Bridge revision.
+This is useful when preparing the environment library before updating the
+SDK's exact Bridge pin. The exact environment description includes
+`lean_bridge_runtime_prepare`, which hydrates Mathlib artifacts and builds
+`lean_bridge` before the environment is published.
