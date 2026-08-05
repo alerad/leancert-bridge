@@ -52,6 +52,15 @@ jobs:
 
     runs-on: ${{ matrix.os }}
 
+    env:
+      # Windows MAX_PATH is 260 characters. The managed-environment store
+      # nests `environments/.staging-<pid>-<uuid>/workspace/.lake/packages/
+      # mathlib/.lake/build/lib/lean/<module>.olean.server` under this home;
+      # rooted at the workspace that reaches 272+ characters and every
+      # leantar decompression fails with `os error 3`. A two-letter root on
+      # the workspace drive keeps the worst case near 220.
+      LEAN_RUNTIME_HOME: ${{ matrix.platform == 'windows' && 'D:\lr' || format('{0}/.lean-runtime-ci', github.workspace) }}
+
     permissions:
       contents: read
       id-token: write
@@ -242,9 +251,9 @@ jobs:
         uses: actions/cache@v4
         with:
           path: |
-            .lean-runtime-ci
+            ${{ env.LEAN_RUNTIME_HOME }}
             environment-publication/environment.lock-${{ matrix.platform }}-${{ matrix.arch }}.json
-          key: lean-runtime-environment-v1-${{ matrix.platform }}-${{ matrix.arch }}-${{ inputs.bridge-revision || github.sha }}
+          key: lean-runtime-environment-v2-${{ matrix.platform }}-${{ matrix.arch }}-${{ inputs.bridge-revision || github.sha }}
 
       - name: Resolve exact environment description
         if: github.event_name != 'pull_request'
