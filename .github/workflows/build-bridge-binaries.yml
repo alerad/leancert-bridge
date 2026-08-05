@@ -1,7 +1,7 @@
 name: Build Bridge Binaries
 
 env:
-  LEAN_RUNTIME_REVISION: 198f37308133a722f965c2543b69dcf1b3fb164f
+  LEAN_RUNTIME_REVISION: bb4e22b5a3abe1a0a8830fde0e1271670e3efa3b
   PROGRAM_LIBRARY: ghcr.io/alerad/leancert-bridge-programs
   LEANCERT_ENVIRONMENT_LIBRARY: ghcr.io/alerad/leancert-runtime
 
