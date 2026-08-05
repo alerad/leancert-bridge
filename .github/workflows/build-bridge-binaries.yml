@@ -1,8 +1,8 @@
 name: Build Bridge Binaries
 
 env:
-  LEAN_RUNTIME_REVISION: 9e16b67737bc110c89461b90f014bb8db82b1f78
-  CAPSULE_REPOSITORY: oci://ghcr.io/alerad/leancert-bridge-capsules
+  LEAN_RUNTIME_REVISION: f995abe15851fe211a9e6f6d1541d3f60a037145
+  PROGRAM_LIBRARY: ghcr.io/alerad/leancert-bridge-programs
 
 on:
   pull_request:
@@ -132,31 +132,31 @@ jobs:
           }
         shell: pwsh
 
-      - name: Install capsule publisher
+      - name: Install ready-program publisher
         shell: bash
         run: >-
           python -m pip install
           "git+https://github.com/alerad/lean-runtime.git@${LEAN_RUNTIME_REVISION}"
 
-      - name: Stage thin Bridge capsule
+      - name: Stage the ready-to-run Bridge program
         shell: bash
         run: |
           set -euo pipefail
-          python scripts/stage_capsule.py ".lake/build/bin/${{ matrix.binary_name }}" capsule-payload
+          python scripts/stage_program.py ".lake/build/bin/${{ matrix.binary_name }}" program-payload
           command_path="bin/lean_bridge"
           if [[ "${{ matrix.platform }}" == "windows" ]]; then
             command_path="bin/lean_bridge.exe"
           fi
-          python -m lean_runtime --home capsule-store capsule-create capsule-payload \
+          python -m lean_runtime --home program-store program-create program-payload \
             --command "$command_path" \
             --source-revision "$GITHUB_SHA" \
             --toolchain "$(tr -d '\r\n' < lean-toolchain)" \
-            > capsule-created.json
-          capsule_id="$(python -c 'import json; print(json.load(open("capsule-created.json"))["capsule_id"])')"
-          python -m lean_runtime --home capsule-store capsule-export "$capsule_id" \
-            --output "dist/leancert-bridge-capsule-${{ matrix.platform }}-${{ matrix.arch }}.oci.tar.gz"
-          python scripts/smoke_capsule.py \
-            "dist/leancert-bridge-capsule-${{ matrix.platform }}-${{ matrix.arch }}.oci.tar.gz"
+            > program-created.json
+          program_id="$(python -c 'import json; print(json.load(open("program-created.json"))["program_id"])')"
+          python -m lean_runtime --home program-store program-save-copy "$program_id" \
+            --output "dist/leancert-bridge-program-${{ matrix.platform }}-${{ matrix.arch }}.tar.gz"
+          python scripts/smoke_program.py \
+            "dist/leancert-bridge-program-${{ matrix.platform }}-${{ matrix.arch }}.tar.gz"
 
       - name: Log in to GHCR
         if: github.event_name != 'pull_request'
@@ -166,14 +166,14 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Publish platform capsule manifest
+      - name: Publish computer-specific ready program
         if: github.event_name != 'pull_request'
         shell: bash
         run: |
           set -euo pipefail
-          capsule_id="$(python -c 'import json; print(json.load(open("capsule-created.json"))["capsule_id"])')"
-          python -m lean_runtime --home capsule-store capsule-push "$capsule_id" \
-            --repository "$CAPSULE_REPOSITORY" > capsule-platform.json
+          program_id="$(python -c 'import json; print(json.load(open("program-created.json"))["program_id"])')"
+          python -m lean_runtime --home program-store program-publish "$program_id" \
+            --library "$PROGRAM_LIBRARY" > program-computer.json
 
       - name: Stage artifact (Unix)
         if: matrix.platform != 'windows'
@@ -197,10 +197,10 @@ jobs:
           name: bridge-${{ matrix.platform }}-${{ matrix.arch }}
           path: |
             dist/*
-            capsule-platform.json
+            program-computer.json
           retention-days: 7
 
-  publish-capsule-index:
+  finalize-program-publication:
     needs: build
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
@@ -213,7 +213,7 @@ jobs:
         with:
           pattern: bridge-*
           path: platforms
-      - name: Install capsule publisher
+      - name: Install ready-program publisher
         run: >-
           python -m pip install
           "git+https://github.com/alerad/lean-runtime.git@${LEAN_RUNTIME_REVISION}"
@@ -223,11 +223,11 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
       - uses: sigstore/cosign-installer@v3.8.2
-      - name: Publish multi-platform capsule index
+      - name: Finalize multi-computer program publication
         shell: bash
         run: |
           set -euo pipefail
-          mapfile -t results < <(find platforms -name capsule-platform.json -type f | sort)
+          mapfile -t results < <(find platforms -name program-computer.json -type f | sort)
           test "${#results[@]}" -eq 4
           tags=(--tag "revision-${GITHUB_SHA}")
           if [[ "$GITHUB_REF" == refs/tags/* ]]; then
@@ -235,8 +235,8 @@ jobs:
           elif [[ "$GITHUB_REF" == refs/heads/main ]]; then
             tags+=(--tag latest)
           fi
-          python -m lean_runtime capsule-publish-index "$GITHUB_SHA" "${results[@]}" \
-            --repository "$CAPSULE_REPOSITORY" "${tags[@]}" --sign
+          python -m lean_runtime program-finalize-publication "$GITHUB_SHA" "${results[@]}" \
+            --library "$PROGRAM_LIBRARY" "${tags[@]}" --sign
 
   release:
     needs: build
