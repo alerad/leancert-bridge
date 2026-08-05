@@ -100,6 +100,13 @@ by the runtime handshake; they are compatibility metadata, not components of
 the Bridge version. Older toolchain-aligned tags remain valid historical
 releases.
 
+Ordinary SDK execution is also published as a thin, multi-platform OCI capsule
+at `ghcr.io/alerad/leancert-bridge-capsules`. The capsule contains only the
+Bridge executable and its runtime libraries plus an exact, hashed manifest. It
+does not contain Mathlib sources or claim independent rebuildability. Full Lean
+environments remain the authority for kernel replay, downstream profile builds,
+and reproducibility audits.
+
 On tag push, CI builds platform binaries and publishes GitHub release assets:
 
 - `lean_bridge-linux-x86_64`
