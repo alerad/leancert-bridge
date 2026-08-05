@@ -1,7 +1,8 @@
 name: Build Bridge Binaries
 
 env:
-  LEAN_RUNTIME_REVISION: bb4e22b5a3abe1a0a8830fde0e1271670e3efa3b
+  LEAN_RUNTIME_REVISION: aea70176ec9588f3b24389610bb8b9ca2beabcfa
+  LEAN_RUNTIME_HOME: ${{ github.workspace }}/.lean-runtime-ci
   PROGRAM_LIBRARY: ghcr.io/alerad/leancert-bridge-programs
   LEANCERT_ENVIRONMENT_LIBRARY: ghcr.io/alerad/leancert-runtime
 
@@ -86,9 +87,9 @@ jobs:
         uses: actions/cache@v4
         with:
           path: .lake
-          key: lake-bridge-${{ matrix.platform }}-${{ matrix.arch }}-${{ hashFiles('lakefile.lean', 'lean-toolchain') }}
+          key: lake-bridge-v2-${{ matrix.platform }}-${{ matrix.arch }}-${{ hashFiles('lakefile.lean', 'lean-toolchain', 'BridgeMain.lean', 'LeanBridge/**/*.lean', 'BridgeBuild/**/*.lean') }}
           restore-keys: |
-            lake-bridge-${{ matrix.platform }}-${{ matrix.arch }}-
+            lake-bridge-v2-${{ matrix.platform }}-${{ matrix.arch }}-
 
       - name: Build lean_bridge (Unix)
         if: matrix.platform != 'windows'
@@ -214,6 +215,15 @@ jobs:
             program-computer.json
           retention-days: 7
 
+      - name: Cache exact managed environment
+        if: github.event_name != 'pull_request'
+        uses: actions/cache@v4
+        with:
+          path: |
+            .lean-runtime-ci
+            environment-publication/environment.lock-${{ matrix.platform }}-${{ matrix.arch }}.json
+          key: lean-runtime-environment-v1-${{ matrix.platform }}-${{ matrix.arch }}-${{ inputs.bridge-revision || github.sha }}
+
       - name: Resolve exact environment description
         if: github.event_name != 'pull_request'
         shell: bash
@@ -221,9 +231,12 @@ jobs:
           BRIDGE_REVISION: ${{ inputs.bridge-revision || github.sha }}
         run: |
           mkdir -p environment-publication
-          python scripts/prepare_environment.py \
-            --revision "$BRIDGE_REVISION" \
-            --output "environment-publication/environment.lock-${{ matrix.platform }}-${{ matrix.arch }}.json"
+          lock="environment-publication/environment.lock-${{ matrix.platform }}-${{ matrix.arch }}.json"
+          if [[ ! -f "$lock" ]]; then
+            python scripts/prepare_environment.py \
+              --revision "$BRIDGE_REVISION" \
+              --output "$lock"
+          fi
 
       - name: Install Cosign for environment attestation
         if: github.event_name != 'pull_request'
