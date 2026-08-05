@@ -7,6 +7,18 @@ on:
     tags:
       - 'v*.*.*'
   workflow_dispatch:
+    inputs:
+      runtime-revision:
+        description: Exact Bridge commit to publish (defaults to the workflow commit)
+        required: false
+        type: string
+      runtime-tag:
+        description: Optional OCI alias (defaults to the Git ref name)
+        required: false
+        type: string
+
+env:
+  LEANCERT_RUNTIME_REPOSITORY: oci://ghcr.io/alerad/leancert-runtime
 
 jobs:
   build:
@@ -19,12 +31,12 @@ jobs:
             arch: x86_64
             binary_name: lean_bridge
             asset_name: lean_bridge-linux-x86_64
-          - os: macos-15
+          - os: macos-15-intel
             platform: macos
             arch: x86_64
             binary_name: lean_bridge
             asset_name: lean_bridge-macos-x86_64
-          - os: macos-latest
+          - os: macos-15
             platform: macos
             arch: arm64
             binary_name: lean_bridge
@@ -36,6 +48,11 @@ jobs:
             asset_name: lean_bridge-windows-x86_64.exe
 
     runs-on: ${{ matrix.os }}
+
+    permissions:
+      contents: read
+      id-token: write
+      packages: write
 
     steps:
       - name: Checkout
@@ -148,8 +165,97 @@ jobs:
           path: dist/*
           retention-days: 7
 
-  release:
+      - name: Set up Python for Lean Runtime V1
+        if: github.event_name != 'pull_request'
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Resolve exact runtime lock
+        if: github.event_name != 'pull_request'
+        shell: bash
+        env:
+          RUNTIME_REVISION: ${{ inputs.runtime-revision || github.sha }}
+        run: |
+          python -m pip install 'lean-runtime>=1.0.1,<2.0.0'
+          mkdir -p runtime-cache
+          python scripts/resolve_runtime_lock.py \
+            --revision "$RUNTIME_REVISION" \
+            --output "runtime-cache/environment.lock-${{ matrix.platform }}-${{ matrix.arch }}.json"
+
+      - name: Install Cosign for runtime attestation
+        if: github.event_name != 'pull_request'
+        uses: sigstore/cosign-installer@v4.1.2
+
+      - name: Build and publish platform runtime
+        if: github.event_name != 'pull_request'
+        shell: bash
+        env:
+          LEAN_RUNTIME_REGISTRY_USERNAME: ${{ github.actor }}
+          LEAN_RUNTIME_REGISTRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          lean-runtime --quiet build-and-push \
+            "runtime-cache/environment.lock-${{ matrix.platform }}-${{ matrix.arch }}.json" \
+            --push-to "$LEANCERT_RUNTIME_REPOSITORY" \
+            --platform-only \
+            --attest \
+            > "runtime-cache/platform-${{ matrix.platform }}-${{ matrix.arch }}.json"
+
+      - name: Upload runtime publication result
+        if: github.event_name != 'pull_request'
+        uses: actions/upload-artifact@v4
+        with:
+          name: runtime-cache-${{ matrix.platform }}-${{ matrix.arch }}
+          path: runtime-cache/*
+          retention-days: 7
+
+  publish-runtime-index:
     needs: build
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: runtime-cache-*
+          path: runtime-cache
+          merge-multiple: true
+      - name: Publish complete multi-platform index
+        shell: bash
+        env:
+          LEAN_RUNTIME_REGISTRY_USERNAME: ${{ github.actor }}
+          LEAN_RUNTIME_REGISTRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
+          RUNTIME_TAG: ${{ inputs.runtime-tag || github.ref_name }}
+        run: |
+          python -m pip install 'lean-runtime>=1.0.1,<2.0.0'
+          LOCK_ID="$(python - <<'PY'
+          import json
+          from pathlib import Path
+
+          locks = list(Path("runtime-cache").glob("environment.lock*.json"))
+          if not locks:
+              raise SystemExit("no runtime lock was downloaded")
+          lock_ids = {json.loads(path.read_text())["lock_id"] for path in locks}
+          if len(lock_ids) != 1:
+              raise SystemExit(f"platform jobs resolved different locks: {sorted(lock_ids)}")
+          print(lock_ids.pop())
+          PY
+          )"
+          mapfile -t RESULTS < <(find runtime-cache -name 'platform-*.json' -print | sort)
+          test "${#RESULTS[@]}" -eq 4
+          lean-runtime --quiet publish-index \
+            "$LOCK_ID" "${RESULTS[@]}" \
+            --repository "$LEANCERT_RUNTIME_REPOSITORY" \
+            --tag "$RUNTIME_TAG"
+
+  release:
+    needs: [build, publish-runtime-index]
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     permissions:
