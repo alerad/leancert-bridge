@@ -1,7 +1,7 @@
 name: Build Bridge Binaries
 
 env:
-  LEAN_RUNTIME_REVISION: aea70176ec9588f3b24389610bb8b9ca2beabcfa
+  LEAN_RUNTIME_REVISION: 17b1d92d08a18b4130a461240d4a2427486c45e2
   LEAN_RUNTIME_HOME: ${{ github.workspace }}/.lean-runtime-ci
   PROGRAM_LIBRARY: ghcr.io/alerad/leancert-bridge-programs
   LEANCERT_ENVIRONMENT_LIBRARY: ghcr.io/alerad/leancert-runtime
@@ -84,7 +84,8 @@ jobs:
         shell: pwsh
 
       - name: Cache Lake packages
-        uses: actions/cache@v4
+        id: lake-cache
+        uses: actions/cache/restore@v4
         with:
           path: .lake
           key: lake-bridge-v2-${{ matrix.platform }}-${{ matrix.arch }}-${{ hashFiles('lakefile.lean', 'lean-toolchain', 'BridgeMain.lean', 'LeanBridge/**/*.lean', 'BridgeBuild/**/*.lean') }}
@@ -215,6 +216,27 @@ jobs:
             program-computer.json
           retention-days: 7
 
+      - name: Save refreshed Lake artifacts
+        if: steps.lake-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: .lake
+          key: lake-bridge-v2-${{ matrix.platform }}-${{ matrix.arch }}-${{ hashFiles('lakefile.lean', 'lean-toolchain', 'BridgeMain.lean', 'LeanBridge/**/*.lean', 'BridgeBuild/**/*.lean') }}
+
+      - name: Release ordinary-build disk space
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          from lean_runtime._paths import remove_tree
+
+          for name in (".lake", "program-store", "program-payload", "dist"):
+              path = Path(name)
+              if path.exists():
+                  remove_tree(path)
+          PY
+          df -h . || true
+
       - name: Cache exact managed environment
         if: github.event_name != 'pull_request'
         uses: actions/cache@v4
@@ -249,7 +271,7 @@ jobs:
           LEAN_RUNTIME_REGISTRY_USERNAME: ${{ github.actor }}
           LEAN_RUNTIME_REGISTRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          lean-runtime --quiet build-and-publish \
+          lean-runtime --quiet --verbose build-and-publish \
             "environment-publication/environment.lock-${{ matrix.platform }}-${{ matrix.arch }}.json" \
             --publish-to "$LEANCERT_ENVIRONMENT_LIBRARY" \
             --platform-only \
