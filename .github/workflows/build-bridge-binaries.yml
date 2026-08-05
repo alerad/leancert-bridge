@@ -312,7 +312,7 @@ jobs:
         run: >-
           python -m pip install
           "git+https://github.com/alerad/lean-runtime.git@${LEAN_RUNTIME_REVISION}"
-      - uses: sigstore/cosign-installer@v3.8.2
+      - uses: sigstore/cosign-installer@v4.1.2
       - name: Finalize multi-computer program publication
         shell: bash
         env:
