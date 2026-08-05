@@ -181,6 +181,9 @@ jobs:
       - name: Publish computer-specific ready program
         if: github.event_name != 'pull_request'
         shell: bash
+        env:
+          LEAN_RUNTIME_REGISTRY_USERNAME: ${{ github.actor }}
+          LEAN_RUNTIME_REGISTRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
           program_id="$(python -c 'import json; print(json.load(open("program-created.json"))["program_id"])')"
@@ -274,6 +277,9 @@ jobs:
       - uses: sigstore/cosign-installer@v3.8.2
       - name: Finalize multi-computer program publication
         shell: bash
+        env:
+          LEAN_RUNTIME_REGISTRY_USERNAME: ${{ github.actor }}
+          LEAN_RUNTIME_REGISTRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
           mapfile -t results < <(find platforms -name program-computer.json -type f | sort)
