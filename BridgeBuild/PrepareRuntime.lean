@@ -18,6 +18,14 @@ private def runLake (arguments : Array String) : IO UInt32 := do
   let result ← IO.Process.output {
     cmd := "lake"
     args := arguments
+    -- This helper is itself launched through `lake exe`, which augments these
+    -- variables for the helper target. A nested Lake invocation must discover
+    -- the enclosing workspace afresh; inheriting the outer target's paths
+    -- prevents Mathlib's cache executable from resolving `Mathlib`.
+    env := #[
+      ("LEAN_PATH", none),
+      ("LEAN_SRC_PATH", none)
+    ]
   }
   IO.print result.stdout
   IO.eprint result.stderr
