@@ -1,7 +1,7 @@
 name: Build Bridge Binaries
 
 env:
-  LEAN_RUNTIME_REVISION: c37b4f8c4205e821a30cd521c85a9ccd8057a1e3
+  LEAN_RUNTIME_REVISION: 9e16b67737bc110c89461b90f014bb8db82b1f78
   CAPSULE_REPOSITORY: oci://ghcr.io/alerad/leancert-bridge-capsules
 
 on:
@@ -222,6 +222,7 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: sigstore/cosign-installer@v3.8.2
       - name: Publish multi-platform capsule index
         shell: bash
         run: |
@@ -235,7 +236,7 @@ jobs:
             tags+=(--tag latest)
           fi
           python -m lean_runtime capsule-publish-index "$GITHUB_SHA" "${results[@]}" \
-            --repository "$CAPSULE_REPOSITORY" "${tags[@]}"
+            --repository "$CAPSULE_REPOSITORY" "${tags[@]}" --sign
 
   release:
     needs: build
