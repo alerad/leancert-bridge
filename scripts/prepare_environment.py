@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Resolve the exact managed Bridge environment published to the OCI cache."""
+"""Prepare the exact Bridge environment published to the environment library."""
 
 from __future__ import annotations
 
@@ -31,13 +31,13 @@ def main() -> int:
     args = parser().parse_args()
     if re.fullmatch(r"[0-9a-fA-F]{40}", args.revision) is None:
         raise SystemExit("--revision must be an exact 40-character Git commit")
-    runtime = Runtime(prebuilt="never")
+    runtime = Runtime(availability="local")
     reference = BRIDGE_REFERENCE.format(revision=args.revision)
     spec = runtime.spec_from_references([reference])
     if len(spec.packages) != 1:
         raise RuntimeError("the Bridge reference must resolve to exactly one direct package")
     package = replace(spec.packages[0], artifact_command=ARTIFACT_COMMAND)
-    lock = runtime.resolve(replace(spec, packages=(package,)), timeout=args.timeout)
+    lock = runtime.prepare(replace(spec, packages=(package,)), timeout=args.timeout)
     lock.write(args.output)
     print(lock.lock_id)
     return 0

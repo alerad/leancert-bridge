@@ -1,5 +1,10 @@
 name: Build Bridge Binaries
 
+env:
+  LEAN_RUNTIME_REVISION: 198f37308133a722f965c2543b69dcf1b3fb164f
+  PROGRAM_LIBRARY: ghcr.io/alerad/leancert-bridge-programs
+  LEANCERT_ENVIRONMENT_LIBRARY: ghcr.io/alerad/leancert-runtime
+
 on:
   pull_request:
   push:
@@ -8,17 +13,14 @@ on:
       - 'v*.*.*'
   workflow_dispatch:
     inputs:
-      runtime-revision:
+      bridge-revision:
         description: Exact Bridge commit to publish (defaults to the workflow commit)
         required: false
         type: string
-      runtime-tag:
-        description: Optional OCI alias (defaults to the Git ref name)
+      environment-tag:
+        description: Optional environment-library alias (defaults to the Git ref name)
         required: false
         type: string
-
-env:
-  LEANCERT_RUNTIME_REPOSITORY: oci://ghcr.io/alerad/leancert-runtime
 
 jobs:
   build:
@@ -142,6 +144,49 @@ jobs:
           }
         shell: pwsh
 
+      - name: Install ready-program publisher
+        shell: bash
+        run: >-
+          python -m pip install
+          "git+https://github.com/alerad/lean-runtime.git@${LEAN_RUNTIME_REVISION}"
+
+      - name: Stage the ready-to-run Bridge program
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/stage_program.py ".lake/build/bin/${{ matrix.binary_name }}" program-payload
+          command_path="bin/lean_bridge"
+          if [[ "${{ matrix.platform }}" == "windows" ]]; then
+            command_path="bin/lean_bridge.exe"
+          fi
+          python -m lean_runtime --home program-store program-create program-payload \
+            --command "$command_path" \
+            --source-revision "$GITHUB_SHA" \
+            --toolchain "$(tr -d '\r\n' < lean-toolchain)" \
+            > program-created.json
+          program_id="$(python -c 'import json; print(json.load(open("program-created.json"))["program_id"])')"
+          python -m lean_runtime --home program-store program-save-copy "$program_id" \
+            --output "dist/leancert-bridge-program-${{ matrix.platform }}-${{ matrix.arch }}.tar.gz"
+          python scripts/smoke_program.py \
+            "dist/leancert-bridge-program-${{ matrix.platform }}-${{ matrix.arch }}.tar.gz"
+
+      - name: Log in to GHCR
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Publish computer-specific ready program
+        if: github.event_name != 'pull_request'
+        shell: bash
+        run: |
+          set -euo pipefail
+          program_id="$(python -c 'import json; print(json.load(open("program-created.json"))["program_id"])')"
+          python -m lean_runtime --home program-store program-publish "$program_id" \
+            --library "$PROGRAM_LIBRARY" > program-computer.json
+
       - name: Stage artifact (Unix)
         if: matrix.platform != 'windows'
         run: |
@@ -162,54 +207,87 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: bridge-${{ matrix.platform }}-${{ matrix.arch }}
-          path: dist/*
+          path: |
+            dist/*
+            program-computer.json
           retention-days: 7
 
-      - name: Set up Python for Lean Runtime V1
-        if: github.event_name != 'pull_request'
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-
-      - name: Resolve exact runtime lock
+      - name: Resolve exact environment description
         if: github.event_name != 'pull_request'
         shell: bash
         env:
-          RUNTIME_REVISION: ${{ inputs.runtime-revision || github.sha }}
+          BRIDGE_REVISION: ${{ inputs.bridge-revision || github.sha }}
         run: |
-          python -m pip install 'lean-runtime>=1.0.1,<2.0.0'
-          mkdir -p runtime-cache
-          python scripts/resolve_runtime_lock.py \
-            --revision "$RUNTIME_REVISION" \
-            --output "runtime-cache/environment.lock-${{ matrix.platform }}-${{ matrix.arch }}.json"
+          mkdir -p environment-publication
+          python scripts/prepare_environment.py \
+            --revision "$BRIDGE_REVISION" \
+            --output "environment-publication/environment.lock-${{ matrix.platform }}-${{ matrix.arch }}.json"
 
-      - name: Install Cosign for runtime attestation
+      - name: Install Cosign for environment attestation
         if: github.event_name != 'pull_request'
         uses: sigstore/cosign-installer@v4.1.2
 
-      - name: Build and publish platform runtime
+      - name: Build and publish computer-specific environment
         if: github.event_name != 'pull_request'
         shell: bash
         env:
           LEAN_RUNTIME_REGISTRY_USERNAME: ${{ github.actor }}
           LEAN_RUNTIME_REGISTRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          lean-runtime --quiet build-and-push \
-            "runtime-cache/environment.lock-${{ matrix.platform }}-${{ matrix.arch }}.json" \
-            --push-to "$LEANCERT_RUNTIME_REPOSITORY" \
+          lean-runtime --quiet build-and-publish \
+            "environment-publication/environment.lock-${{ matrix.platform }}-${{ matrix.arch }}.json" \
+            --publish-to "$LEANCERT_ENVIRONMENT_LIBRARY" \
             --platform-only \
             --attest \
-            > "runtime-cache/platform-${{ matrix.platform }}-${{ matrix.arch }}.json"
+            > "environment-publication/computer-${{ matrix.platform }}-${{ matrix.arch }}.json"
 
-      - name: Upload runtime publication result
+      - name: Upload environment publication result
         if: github.event_name != 'pull_request'
         uses: actions/upload-artifact@v4
         with:
-          name: runtime-cache-${{ matrix.platform }}-${{ matrix.arch }}
-          path: runtime-cache/*
+          name: environment-${{ matrix.platform }}-${{ matrix.arch }}
+          path: environment-publication/*
           retention-days: 7
 
-  publish-runtime-index:
+  finalize-program-publication:
+    needs: build
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: bridge-*
+          path: platforms
+      - name: Install ready-program publisher
+        run: >-
+          python -m pip install
+          "git+https://github.com/alerad/lean-runtime.git@${LEAN_RUNTIME_REVISION}"
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: sigstore/cosign-installer@v3.8.2
+      - name: Finalize multi-computer program publication
+        shell: bash
+        run: |
+          set -euo pipefail
+          mapfile -t results < <(find platforms -name program-computer.json -type f | sort)
+          test "${#results[@]}" -eq 4
+          tags=(--tag "revision-${GITHUB_SHA}")
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            tags+=(--tag "${GITHUB_REF_NAME}")
+          elif [[ "$GITHUB_REF" == refs/heads/main ]]; then
+            tags+=(--tag latest)
+          fi
+          python -m lean_runtime program-finalize-publication "$GITHUB_SHA" "${results[@]}" \
+            --library "$PROGRAM_LIBRARY" "${tags[@]}" --sign
+
+  finalize-environment-publication:
     needs: build
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
@@ -223,39 +301,42 @@ jobs:
           python-version: '3.12'
       - uses: actions/download-artifact@v4
         with:
-          pattern: runtime-cache-*
-          path: runtime-cache
+          pattern: environment-*
+          path: environment-publication
           merge-multiple: true
-      - name: Publish complete multi-platform index
+      - name: Install Lean Runtime
+        run: >-
+          python -m pip install
+          "git+https://github.com/alerad/lean-runtime.git@${LEAN_RUNTIME_REVISION}"
+      - name: Finalize multi-computer environment publication
         shell: bash
         env:
           LEAN_RUNTIME_REGISTRY_USERNAME: ${{ github.actor }}
           LEAN_RUNTIME_REGISTRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
-          RUNTIME_TAG: ${{ inputs.runtime-tag || github.ref_name }}
+          ENVIRONMENT_TAG: ${{ inputs.environment-tag || github.ref_name }}
         run: |
-          python -m pip install 'lean-runtime>=1.0.1,<2.0.0'
           LOCK_ID="$(python - <<'PY'
           import json
           from pathlib import Path
 
-          locks = list(Path("runtime-cache").glob("environment.lock*.json"))
+          locks = list(Path("environment-publication").glob("environment.lock*.json"))
           if not locks:
-              raise SystemExit("no runtime lock was downloaded")
+              raise SystemExit("no environment description was downloaded")
           lock_ids = {json.loads(path.read_text())["lock_id"] for path in locks}
           if len(lock_ids) != 1:
-              raise SystemExit(f"platform jobs resolved different locks: {sorted(lock_ids)}")
+              raise SystemExit(f"computer jobs prepared different environments: {sorted(lock_ids)}")
           print(lock_ids.pop())
           PY
           )"
-          mapfile -t RESULTS < <(find runtime-cache -name 'platform-*.json' -print | sort)
+          mapfile -t RESULTS < <(find environment-publication -name 'computer-*.json' -print | sort)
           test "${#RESULTS[@]}" -eq 4
-          lean-runtime --quiet publish-index \
+          lean-runtime --quiet finalize-publication \
             "$LOCK_ID" "${RESULTS[@]}" \
-            --repository "$LEANCERT_RUNTIME_REPOSITORY" \
-            --tag "$RUNTIME_TAG"
+            --library "$LEANCERT_ENVIRONMENT_LIBRARY" \
+            --tag "$ENVIRONMENT_TAG"
 
   release:
-    needs: [build, publish-runtime-index]
+    needs: [build, finalize-program-publication, finalize-environment-publication]
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     permissions:

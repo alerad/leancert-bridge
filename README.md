@@ -100,6 +100,13 @@ by the runtime handshake; they are compatibility metadata, not components of
 the Bridge version. Older toolchain-aligned tags remain valid historical
 releases.
 
+Ordinary SDK execution is also published as a small, multi-computer
+ready-to-run program in the `ghcr.io/alerad/leancert-bridge-programs` program
+library. It contains only the Bridge executable and its runtime libraries plus
+an exact program description. It does not contain Mathlib sources or claim
+independent rebuildability. Full Lean environments remain the authority for
+kernel replay, downstream profile builds, and reproducibility audits.
+
 On tag push, CI builds platform binaries and publishes GitHub release assets:
 
 - `lean_bridge-linux-x86_64`
@@ -107,15 +114,16 @@ On tag push, CI builds platform binaries and publishes GitHub release assets:
 - `lean_bridge-macos-arm64`
 - `lean_bridge-windows-x86_64.exe`
 
-The same matrix publishes the exact managed Bridge environment to
-`oci://ghcr.io/alerad/leancert-runtime`. Each platform uploads its immutable
-package layers and manifest; a final job publishes the lock index only after
-all platforms resolve the same environment lock. `leancert-python` can then
-download and verify this prebuilt environment through Lean Runtime V1 instead
-of rebuilding LeanCert and Mathlib locally. A cache miss still falls back to a
-source build.
+The same matrix publishes the exact managed Bridge environment to the
+`ghcr.io/alerad/leancert-runtime` environment library. Each computer uploads
+its immutable environment copy and computer record; a final job completes the
+publication only after all computers prepare the same exact environment.
+`leancert-python` can then download and verify this environment through Lean
+Runtime 2 instead of rebuilding LeanCert and Mathlib locally. When no suitable
+download is available, Lean Runtime can still fall back to a source build.
 
 Manual workflow dispatch can publish a specific 40-character Bridge revision.
-This is useful when preparing the cache before updating the SDK's exact Bridge
-pin. The runtime lock includes `lean_bridge_runtime_prepare`, which hydrates
-Mathlib artifacts and builds `lean_bridge` before the environment is bundled.
+This is useful when preparing the environment library before updating the
+SDK's exact Bridge pin. The exact environment description includes
+`lean_bridge_runtime_prepare`, which hydrates Mathlib artifacts and builds
+`lean_bridge` before the environment is published.
