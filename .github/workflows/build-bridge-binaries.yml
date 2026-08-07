@@ -1,7 +1,7 @@
 name: Build Bridge Binaries
 
 env:
-  LEAN_RUNTIME_REVISION: 17b1d92d08a18b4130a461240d4a2427486c45e2
+  LEAN_RUNTIME_REVISION: 334fd5dc1251c45cf5d71af9bfad690b22fbfa02
   LEAN_RUNTIME_HOME: ${{ github.workspace }}/.lean-runtime-ci
   PROGRAM_LIBRARY: ghcr.io/alerad/leancert-bridge-programs
   LEANCERT_ENVIRONMENT_LIBRARY: ghcr.io/alerad/leancert-runtime
