@@ -1,5 +1,8 @@
 # Releasing leancert-bridge
 
+Bridge release versions, Bridge Contract versions, and Lean ecosystem versions
+are separate axes. See [VERSIONING.md](VERSIONING.md) before preparing a tag.
+
 ## 1. Ensure bridge code and contract are updated
 
 - Update `LeanBridge.lean`
@@ -29,4 +32,7 @@ CI builds binaries for Linux, macOS (x86_64/arm64), and Windows, then publishes 
 
 ## 3. Bump python pin
 
-In `leancert-python`, update `bridge-version.txt` to this tag.
+In `leancert-python`, update `DEFAULT_BRIDGE_PACKAGE_REF` and
+`DEFAULT_BRIDGE_SOURCE_REVISION` in `leancert/client.py` to the released Bridge
+tag's full commit SHA. Keep the package reference immutable; do not pin the SDK
+to a moving branch or release tag.
