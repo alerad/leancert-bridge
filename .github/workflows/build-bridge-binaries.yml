@@ -344,9 +344,20 @@ jobs:
           test "${#results[@]}" -eq 4
           mapfile -t profiles < <(find platforms -name stack-profile.json -type f | sort)
           test "${#profiles[@]}" -eq 4
-          for profile in "${profiles[@]:1}"; do
-            cmp --silent "${profiles[0]}" "$profile"
-          done
+          python - "${profiles[@]}" <<'PY'
+          import json
+          import sys
+          from pathlib import Path
+
+          paths = [Path(value) for value in sys.argv[1:]]
+          profiles = [json.loads(path.read_text(encoding="utf-8-sig")) for path in paths]
+          if any(profile != profiles[0] for profile in profiles[1:]):
+              raise SystemExit("platform stack profiles disagree")
+          Path("stack-profile.json").write_text(
+              json.dumps(profiles[0], indent=2, sort_keys=True) + "\n",
+              encoding="utf-8",
+          )
+          PY
           source_revision="$(python - <<'PY'
           import json
           from pathlib import Path
@@ -368,7 +379,6 @@ jobs:
           fi
           python -m lean_runtime program-finalize-publication "$source_revision" "${results[@]}" \
             --library "$PROGRAM_LIBRARY" "${tags[@]}" --sign > program-publication.json
-          cp "${profiles[0]}" stack-profile.json
           cat program-publication.json
 
       - name: Upload immutable program promotion record
