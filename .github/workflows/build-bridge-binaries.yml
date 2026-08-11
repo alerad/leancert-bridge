@@ -1,7 +1,7 @@
 name: Build Bridge Binaries
 
 env:
-  LEAN_RUNTIME_REVISION: 334fd5dc1251c45cf5d71af9bfad690b22fbfa02
+  LEAN_RUNTIME_REVISION: v2.0.8
   LEAN_RUNTIME_HOME: ${{ github.workspace }}/.lean-runtime-ci
   PROGRAM_LIBRARY: ghcr.io/alerad/leancert-bridge-programs
   LEANCERT_ENVIRONMENT_LIBRARY: ghcr.io/alerad/leancert-runtime
@@ -69,6 +69,12 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.bridge-revision || github.sha }}
+
+      - name: Record exact Bridge revision
+        shell: bash
+        run: echo "BRIDGE_REVISION=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
 
       - name: Install Elan (Unix)
         if: matrix.platform != 'windows'
@@ -168,6 +174,15 @@ jobs:
           python -m pip install
           "git+https://github.com/alerad/lean-runtime.git@${LEAN_RUNTIME_REVISION}"
 
+      - name: Derive checked stack provenance
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/generate_stack_profile.py \
+            --binary ".lake/build/bin/${{ matrix.binary_name }}" \
+            --bridge-revision "$BRIDGE_REVISION" \
+            --output stack-profile.json
+
       - name: Stage the ready-to-run Bridge program
         shell: bash
         run: |
@@ -179,8 +194,10 @@ jobs:
           fi
           python -m lean_runtime --home program-store program-create program-payload \
             --command "$command_path" \
-            --source-revision "$GITHUB_SHA" \
+            --source-revision "$BRIDGE_REVISION" \
             --toolchain "$(tr -d '\r\n' < lean-toolchain)" \
+            --capability-id "$(python -c 'import json; print(json.load(open("stack-profile.json"))["leancert.capability.digest"])')" \
+            --provenance-file stack-profile.json \
             > program-created.json
           program_id="$(python -c 'import json; print(json.load(open("program-created.json"))["program_id"])')"
           python -m lean_runtime --home program-store program-save-copy "$program_id" \
@@ -223,6 +240,7 @@ jobs:
           path: |
             dist/*
             program-computer.json
+            stack-profile.json
           retention-days: 7
 
       - name: Save refreshed Lake artifacts
@@ -322,14 +340,43 @@ jobs:
           set -euo pipefail
           mapfile -t results < <(find platforms -name program-computer.json -type f | sort)
           test "${#results[@]}" -eq 4
-          tags=(--tag "revision-${GITHUB_SHA}")
-          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+          mapfile -t profiles < <(find platforms -name stack-profile.json -type f | sort)
+          test "${#profiles[@]}" -eq 4
+          for profile in "${profiles[@]:1}"; do
+            cmp --silent "${profiles[0]}" "$profile"
+          done
+          source_revision="$(python - <<'PY'
+          import json
+          from pathlib import Path
+
+          revisions = {
+              json.loads(path.read_text())["source_revision"]
+              for path in Path("platforms").rglob("program-computer.json")
+          }
+          if len(revisions) != 1:
+              raise SystemExit(f"platform program revisions disagree: {sorted(revisions)}")
+          print(revisions.pop())
+          PY
+          )"
+          tags=(--tag "revision-${source_revision}")
+          if [[ "$GITHUB_EVENT_NAME" == "push" && "$GITHUB_REF" == refs/tags/* ]]; then
             tags+=(--tag "${GITHUB_REF_NAME}")
-          elif [[ "$GITHUB_REF" == refs/heads/main ]]; then
+          elif [[ "$GITHUB_EVENT_NAME" == "push" && "$GITHUB_REF" == refs/heads/main ]]; then
             tags+=(--tag latest)
           fi
-          python -m lean_runtime program-finalize-publication "$GITHUB_SHA" "${results[@]}" \
-            --library "$PROGRAM_LIBRARY" "${tags[@]}" --sign
+          python -m lean_runtime program-finalize-publication "$source_revision" "${results[@]}" \
+            --library "$PROGRAM_LIBRARY" "${tags[@]}" --sign > program-publication.json
+          cp "${profiles[0]}" stack-profile.json
+          cat program-publication.json
+
+      - name: Upload immutable program promotion record
+        uses: actions/upload-artifact@v4
+        with:
+          name: bridge-program-publication
+          path: |
+            program-publication.json
+            stack-profile.json
+          retention-days: 30
 
   finalize-environment-publication:
     needs: build
