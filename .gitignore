@@ -4,3 +4,4 @@
 *.ilean
 *.trace
 /dist/
+__pycache__/

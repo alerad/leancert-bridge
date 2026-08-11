@@ -107,6 +107,13 @@ an exact program description. It does not contain Mathlib sources or claim
 independent rebuildability. Full Lean environments remain the authority for
 kernel replay, downstream profile builds, and reproducibility audits.
 
+Each newly published program derives a checked stack profile from its resolved
+Lake graph and the built binary's live handshake. The exact Lean toolchain,
+LeanCert Core and Bridge revisions, protocol version, and semantic capability
+digest are content-addressed as program provenance. Publication stops if the
+platform builds disagree. SDK releases can therefore pin one immutable OCI
+index digest and verify the downloaded program against its live handshake.
+
 On tag push, CI builds platform binaries and publishes GitHub release assets:
 
 - `lean_bridge-linux-x86_64`
