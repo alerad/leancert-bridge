@@ -56,13 +56,13 @@ open Lean
 def bridgeApiVersion : String := "3.0.0"
 
 /-- Bridge binary version (decoupled from API version). -/
-def bridgeVersion : String := "0.9.0-dev"
+def bridgeVersion : String := "1.1.0"
 
 /-- Lean toolchain version used to build this bridge binary. -/
 def leanVersion : String := Lean.versionString
 
 /-- LeanCert release selected by `lakefile.lean`. -/
-def leanCertVersion : String := "06cf13980fde15b21fe2600cbb8b8d4e0e612f3c"
+def leanCertVersion : String := "7486c107f7c2ce814d0914a5f82f7f157ff8bb57"
 
 /-- Certificate/result schema emitted by checked bound operations. -/
 def boundCertificateSchema : String := "bound-check/2"

@@ -55,7 +55,7 @@ class StackProfileTests(unittest.TestCase):
     def test_core_revision_comes_from_exact_lake_resolution(self) -> None:
         self.assertEqual(
             core_revision(ROOT / "lake-manifest.json"),
-            "06cf13980fde15b21fe2600cbb8b8d4e0e612f3c",
+            "7486c107f7c2ce814d0914a5f82f7f157ff8bb57",
         )
 
 
