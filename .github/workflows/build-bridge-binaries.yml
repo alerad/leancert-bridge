@@ -1,7 +1,7 @@
 name: Build Bridge Binaries
 
 env:
-  LEAN_RUNTIME_REVISION: v2.0.8
+  LEAN_RUNTIME_REVISION: v2.0.9
   LEAN_RUNTIME_HOME: ${{ github.workspace }}/.lean-runtime-ci
   PROGRAM_LIBRARY: ghcr.io/alerad/leancert-bridge-programs
   LEANCERT_ENVIRONMENT_LIBRARY: ghcr.io/alerad/leancert-runtime
@@ -302,6 +302,7 @@ jobs:
           lean-runtime --quiet --verbose build-and-publish \
             "environment-publication/environment.lock-${{ matrix.platform }}-${{ matrix.arch }}.json" \
             --publish-to "$LEANCERT_ENVIRONMENT_LIBRARY" \
+            --timeout 3600 \
             --platform-only \
             --attest \
             > "environment-publication/computer-${{ matrix.platform }}-${{ matrix.arch }}.json"

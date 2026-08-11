@@ -69,7 +69,7 @@ unsafe abbrev windowsSafeOExport : ModuleFacetDecl :=
           pure <| if hasInitializers then exporting else hidden
 
 package «LeanCertBridge» where
-  version := v!"1.1.0"
+  version := v!"1.1.1"
 
 require leancert from git
   "https://github.com/alerad/leancert.git" @ "7486c107f7c2ce814d0914a5f82f7f157ff8bb57"
