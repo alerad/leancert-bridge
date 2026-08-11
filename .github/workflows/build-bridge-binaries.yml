@@ -124,6 +124,9 @@ jobs:
           # pwsh only propagates the final command's exit code, so check every
           # native command explicitly; a crashed lake (e.g. segfault) must fail
           # this step instead of letting tests run against stale cached exes.
+          # Keep native compilation below the Windows runner's resource limit;
+          # unconstrained Lean 4.33 builds can crash lake late in the graph.
+          $env:LAKE_JOBS = "2"
           Remove-Item ".lake\build\bin\lean_bridge.exe", ".lake\build\bin\lean_bridge_profile_test.exe" -ErrorAction SilentlyContinue
           lake update
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
