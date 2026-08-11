@@ -102,10 +102,11 @@ jobs:
         id: lake-cache
         uses: actions/cache/restore@v4
         with:
+          # Never restore native objects or oleans across Lean toolchains.
           path: .lake
-          key: lake-bridge-v2-${{ matrix.platform }}-${{ matrix.arch }}-${{ hashFiles('lakefile.lean', 'lean-toolchain', 'BridgeMain.lean', 'LeanBridge/**/*.lean', 'BridgeBuild/**/*.lean') }}
+          key: lake-bridge-v3-${{ matrix.platform }}-${{ matrix.arch }}-${{ hashFiles('lean-toolchain') }}-${{ hashFiles('lakefile.lean', 'lake-manifest.json', 'BridgeMain.lean', 'LeanBridge/**/*.lean', 'BridgeBuild/**/*.lean') }}
           restore-keys: |
-            lake-bridge-v2-${{ matrix.platform }}-${{ matrix.arch }}-
+            lake-bridge-v3-${{ matrix.platform }}-${{ matrix.arch }}-${{ hashFiles('lean-toolchain') }}-
 
       - name: Build lean_bridge (Unix)
         if: matrix.platform != 'windows'
@@ -127,19 +128,10 @@ jobs:
           Remove-Item ".lake\build\bin\lean_bridge.exe", ".lake\build\bin\lean_bridge_profile_test.exe" -ErrorAction SilentlyContinue
           lake update
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          # Lean 4.33 can intermittently terminate Lake with a native access
-          # violation late in large Windows builds. Completed artifacts are
-          # retained, so bounded retries resume the graph rather than rebuild it.
-          $buildExitCode = 1
-          foreach ($attempt in 1..3) {
-            lake build lean_bridge lean_bridge_profile_test
-            $buildExitCode = $LASTEXITCODE
-            if ($buildExitCode -eq 0) { break }
-            Write-Output "::warning title=lake build attempt failed::attempt $attempt exited with code $buildExitCode"
-          }
-          if ($buildExitCode -ne 0) {
-            Write-Output "::error title=lake build failed::lake exited with code $buildExitCode after 3 attempts"
-            exit $buildExitCode
+          lake build lean_bridge lean_bridge_profile_test
+          if ($LASTEXITCODE -ne 0) {
+            Write-Output "::error title=lake build failed::lake exited with code $LASTEXITCODE"
+            exit $LASTEXITCODE
           }
           foreach ($exe in "lean_bridge.exe", "lean_bridge_profile_test.exe") {
             if (-not (Test-Path ".lake\build\bin\$exe")) {
@@ -257,7 +249,7 @@ jobs:
         uses: actions/cache/save@v4
         with:
           path: .lake
-          key: lake-bridge-v2-${{ matrix.platform }}-${{ matrix.arch }}-${{ hashFiles('lakefile.lean', 'lean-toolchain', 'BridgeMain.lean', 'LeanBridge/**/*.lean', 'BridgeBuild/**/*.lean') }}
+          key: lake-bridge-v3-${{ matrix.platform }}-${{ matrix.arch }}-${{ hashFiles('lean-toolchain') }}-${{ hashFiles('lakefile.lean', 'lake-manifest.json', 'BridgeMain.lean', 'LeanBridge/**/*.lean', 'BridgeBuild/**/*.lean') }}
 
       - name: Release ordinary-build disk space
         shell: bash
