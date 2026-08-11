@@ -124,16 +124,22 @@ jobs:
           # pwsh only propagates the final command's exit code, so check every
           # native command explicitly; a crashed lake (e.g. segfault) must fail
           # this step instead of letting tests run against stale cached exes.
-          # Keep native compilation below the Windows runner's resource limit;
-          # unconstrained Lean 4.33 builds can crash lake late in the graph.
-          $env:LAKE_JOBS = "2"
           Remove-Item ".lake\build\bin\lean_bridge.exe", ".lake\build\bin\lean_bridge_profile_test.exe" -ErrorAction SilentlyContinue
           lake update
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          lake build lean_bridge lean_bridge_profile_test
-          if ($LASTEXITCODE -ne 0) {
-            Write-Output "::error title=lake build failed::lake exited with code $LASTEXITCODE"
-            exit $LASTEXITCODE
+          # Lean 4.33 can intermittently terminate Lake with a native access
+          # violation late in large Windows builds. Completed artifacts are
+          # retained, so bounded retries resume the graph rather than rebuild it.
+          $buildExitCode = 1
+          foreach ($attempt in 1..3) {
+            lake build lean_bridge lean_bridge_profile_test
+            $buildExitCode = $LASTEXITCODE
+            if ($buildExitCode -eq 0) { break }
+            Write-Output "::warning title=lake build attempt failed::attempt $attempt exited with code $buildExitCode"
+          }
+          if ($buildExitCode -ne 0) {
+            Write-Output "::error title=lake build failed::lake exited with code $buildExitCode after 3 attempts"
+            exit $buildExitCode
           }
           foreach ($exe in "lean_bridge.exe", "lean_bridge_profile_test.exe") {
             if (-not (Test-Path ".lake\build\bin\$exe")) {
