@@ -56,7 +56,7 @@ open Lean
 def bridgeApiVersion : String := "3.0.0"
 
 /-- Bridge binary version (decoupled from API version). -/
-def bridgeVersion : String := "1.1.1"
+def bridgeVersion : String := "1.1.2"
 
 /-- Lean toolchain version used to build this bridge binary. -/
 def leanVersion : String := Lean.versionString
