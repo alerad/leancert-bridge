@@ -20,13 +20,12 @@ unsafe def readPartsHaveInitializers (paths : Array System.FilePath) :
 than guessing from namespaces or source syntax. Meta initializers live in the
 `.olean` parts; runtime initializers may live in `.ir`.
 
-Module-system `.olean`/`.olean.server`/`.olean.private` parts are saved with
-`saveModuleDataParts` and share compacted regions, so they must be loaded
-together, in order, via `readModuleDataParts`; reading a later part on its own
-dereferences pointers into the earlier parts and crashes Lake. The `.ir` part
-has its own base address and may be read individually. Regions are freed after
-each check (in reverse order, once no data references remain) so scanning the
-whole import closure stays within memory. -/
+Module-system `.olean`/`.olean.server`/`.olean.private` and `.ir.sig`/`.ir`
+parts are saved with `saveModuleDataParts` and share compacted regions, so each
+group must be loaded together, in order, via `readModuleDataParts`; reading a
+later part on its own dereferences pointers into the earlier parts and crashes
+Lake. Regions are freed after each check (in reverse order, once no data
+references remain) so scanning the whole import closure stays within memory. -/
 unsafe def moduleHasInitializers (arts : ModuleOutputArtifacts) : IO Bool := do
   let mut oleanParts := #[arts.olean.path]
   if let some server := arts.oleanServer? then
@@ -37,7 +36,10 @@ unsafe def moduleHasInitializers (arts : ModuleOutputArtifacts) : IO Bool := do
   oleanRegions.reverse.forM (·.free)
   if found then return true
   let some ir := arts.ir? | return false
-  let (irFound, irRegions) ← readPartsHaveInitializers #[ir.path]
+  let irParts := match arts.irSig? with
+    | some irSig => #[irSig.path, ir.path]
+    | none => #[ir.path]
+  let (irFound, irRegions) ← readPartsHaveInitializers irParts
   irRegions.reverse.forM (·.free)
   return irFound
 
