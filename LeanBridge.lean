@@ -518,6 +518,16 @@ partial def rawExprFromJson (j : Json) : Except String LExpr := do
   | "var" =>
     let idx ← j.getObjValAs? Nat "idx"
     return Expr.var idx
+  | "named_const" =>
+    -- Named mathematical constants with certified interval enclosures in the
+    -- core (e.g. piInterval carries Mathlib's pi_gt_d20/pi_lt_d20 bounds via
+    -- mem_piInterval; namedConst is in ExprSupportedCore). Names mirror the
+    -- serializer below and the SDK's NAMED_CONSTANT_WIRE_NAMES.
+    let name ← j.getObjValAs? String "name"
+    match name with
+    | "pi" => return Expr.namedConst .pi
+    | "euler_mascheroni" => return Expr.namedConst .eulerMascheroni
+    | other => throw s!"Unknown named constant: {other}"
   | "neg" =>
     let e ← rawExprFromJson (← j.getObjVal? "e")
     return Expr.neg e
@@ -2608,7 +2618,7 @@ def handleGetInfo (runtime : Option EnclosureRuntime := none) : Json :=
       ])
     ]),
     ("expression_nodes", toJson [
-      "const", "var", "neg", "add", "sub", "mul", "div", "pow",
+      "const", "var", "named_const", "neg", "add", "sub", "mul", "div", "pow",
       "sin", "cos", "tan", "exp", "log", "sqrt", "inv", "atan",
       "arsinh", "atanh", "sinc", "erf", "abs", "sinh", "cosh",
       "tanh", "min", "max"
